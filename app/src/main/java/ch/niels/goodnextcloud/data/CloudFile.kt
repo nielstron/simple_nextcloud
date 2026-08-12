@@ -17,6 +17,12 @@ data class Account(
     val appPassword: String,
 )
 
+data class LoginFlowSession(
+    val loginUrl: String,
+    val pollEndpoint: String,
+    val token: String,
+)
+
 data class ShareResult(
     val id: String,
     val url: String?,

@@ -25,6 +25,46 @@ class NextcloudClient(
     @Volatile
     private var previewServiceFailed = false
 
+    fun initiateLogin(serverUrl: String): LoginFlowSession {
+        val request = Request.Builder()
+            .url("${NextcloudPath.normalizeServerUrl(serverUrl)}/index.php/login/v2")
+            .post(FormBody.Builder().build())
+            .header("User-Agent", "GoodNextcloud/0.1")
+            .build()
+        return http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
+            parseLoginSession(response.body.string())
+        }
+    }
+
+    fun pollLogin(session: LoginFlowSession): Account? {
+        val request = Request.Builder()
+            .url(session.pollEndpoint)
+            .post(FormBody.Builder().add("token", session.token).build())
+            .header("User-Agent", "GoodNextcloud/0.1")
+            .build()
+        return http.newCall(request).execute().use { response ->
+            if (response.code == 404) return null
+            if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
+            parseLoginAccount(response.body.string())
+        }
+    }
+
+    internal fun parseLoginSession(json: String): LoginFlowSession {
+        val root = JSONObject(json)
+        val poll = root.getJSONObject("poll")
+        return LoginFlowSession(root.getString("login"), poll.getString("endpoint"), poll.getString("token"))
+    }
+
+    internal fun parseLoginAccount(json: String): Account {
+        val root = JSONObject(json)
+        return Account(
+            NextcloudPath.normalizeServerUrl(root.getString("server")),
+            root.getString("loginName"),
+            root.getString("appPassword"),
+        )
+    }
+
     fun list(account: Account, path: String): List<CloudFile> {
         val body = """<?xml version="1.0"?>
             <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">

@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
@@ -49,6 +50,8 @@ data class FileUiState(
     val clipboardMode: ClipboardMode? = null,
     val uploadQueue: List<UploadQueueItem> = emptyList(),
     val highlightedPath: String? = null,
+    val loginUrl: String? = null,
+    val loginWaiting: Boolean = false,
 )
 
 enum class ClipboardMode { COPY, MOVE }
@@ -72,40 +75,98 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var shareUserSearchJob: Job? = null
     private var previewJob: Job? = null
     private var uploadWorkerJob: Job? = null
+    private var loginJob: Job? = null
     private var nextUploadId = 1L
     private val uploadJobs = ArrayDeque<UploadJob>()
     private val _state = MutableStateFlow(FileUiState(account = store.load()))
     val state = _state.asStateFlow()
 
     init {
-        if (_state.value.account != null) refresh()
+        if (_state.value.account != null) {
+            refresh()
+        } else {
+            store.loadPendingLogin()?.let { session ->
+                _state.update { it.copy(loginWaiting = true) }
+                pollLogin(session)
+            }
+        }
     }
 
-    fun connect(server: String, username: String, appPassword: String) {
-        val account = Account(NextcloudPath.normalizeServerUrl(server), username.trim(), appPassword)
-        if (!account.serverUrl.startsWith("https://")) {
+    fun startBrowserLogin(server: String) {
+        val serverUrl = NextcloudPath.normalizeServerUrl(server)
+        if (!serverUrl.startsWith("https://")) {
             _state.update { it.copy(error = "Use an HTTPS Nextcloud address") }
             return
         }
+        loginJob?.cancel()
+        _state.update { it.copy(loading = true, loginWaiting = false, error = null) }
+        loginJob = viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { client.initiateLogin(serverUrl) } }
+                .onFailure { failure ->
+                    _state.update { it.copy(loading = false, loginWaiting = false, error = failure.userMessage()) }
+                }
+                .onSuccess { session ->
+                    store.savePendingLogin(session)
+                    _state.update { it.copy(loading = false, loginWaiting = true, loginUrl = session.loginUrl) }
+                    pollLoginLoop(session)
+                }
+        }
+    }
+
+    private fun pollLogin(session: ch.niels.goodnextcloud.data.LoginFlowSession) {
+        loginJob?.cancel()
+        loginJob = viewModelScope.launch { pollLoginLoop(session) }
+    }
+
+    private suspend fun pollLoginLoop(session: ch.niels.goodnextcloud.data.LoginFlowSession) {
+        repeat(1_200) {
+            delay(1_000)
+            val result = runCatching { withContext(Dispatchers.IO) { client.pollLogin(session) } }
+            val account = result.getOrNull()
+            if (account != null) {
+                store.save(account)
+                store.clearPendingLogin()
+                notifyDocumentRoots()
+                _state.update { it.copy(account = account, loginWaiting = false, loginUrl = null) }
+                finishLogin(account)
+                return
+            }
+            val failure = result.exceptionOrNull()
+            if (failure != null) {
+                _state.update { it.copy(loginWaiting = false, error = failure.userMessage()) }
+                return
+            }
+        }
+        store.clearPendingLogin()
+        _state.update { it.copy(loginWaiting = false, error = "Login approval expired. Try again.") }
+    }
+
+    private suspend fun finishLogin(account: Account) {
         folderCache.clear()
-        _state.update { it.copy(account = account, loading = true, error = null) }
-        viewModelScope.launch {
-            runCatching { withContext(Dispatchers.IO) { client.list(account, "") } }
+        _state.update { it.copy(loading = true, loginWaiting = false, error = null) }
+        runCatching { withContext(Dispatchers.IO) { client.list(account, "") } }
                 .onSuccess { files ->
                     val sorted = files.sortedFiles()
                     folderCache.put("", sorted)
                     folderCache.recordVisit("")
-                    store.save(account)
                     _state.update { it.copy(files = sorted, loading = false) }
                     schedulePrefetch(account, sorted)
                 }
                 .onFailure { failure ->
-                    _state.update { it.copy(account = null, loading = false, error = failure.userMessage()) }
+                    _state.update { it.copy(loading = false, error = failure.userMessage()) }
                 }
-        }
+    }
+
+    fun consumeLoginUrl() = _state.update { it.copy(loginUrl = null) }
+
+    fun cancelBrowserLogin() {
+        loginJob?.cancel()
+        store.clearPendingLogin()
+        _state.update { it.copy(loading = false, loginWaiting = false, loginUrl = null) }
     }
 
     fun disconnect() {
+        loginJob?.cancel()
         navigationJob?.cancel()
         prefetchJob?.cancel()
         uploadWorkerJob?.cancel()
@@ -113,7 +174,15 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         prefetchTarget = null
         folderCache.clear()
         store.clear()
+        notifyDocumentRoots()
         _state.value = FileUiState()
+    }
+
+    private fun notifyDocumentRoots() {
+        getApplication<Application>().contentResolver.notifyChange(
+            DocumentsContract.buildRootsUri("${BuildConfig.APPLICATION_ID}.documents"),
+            null,
+        )
     }
 
     fun open(folder: CloudFile) {

@@ -31,6 +31,29 @@ class AccountStore(context: Context) {
 
     fun clear() = preferences.edit().clear().apply()
 
+    fun savePendingLogin(session: LoginFlowSession) {
+        preferences.edit()
+            .putString("login_url", encrypt(session.loginUrl))
+            .putString("poll_endpoint", encrypt(session.pollEndpoint))
+            .putString("poll_token", encrypt(session.token))
+            .apply()
+    }
+
+    fun loadPendingLogin(): LoginFlowSession? {
+        val loginUrl = preferences.getString("login_url", null)?.let(::decrypt) ?: return null
+        val endpoint = preferences.getString("poll_endpoint", null)?.let(::decrypt) ?: return null
+        val token = preferences.getString("poll_token", null)?.let(::decrypt) ?: return null
+        return LoginFlowSession(loginUrl, endpoint, token)
+    }
+
+    fun clearPendingLogin() {
+        preferences.edit()
+            .remove("login_url")
+            .remove("poll_endpoint")
+            .remove("poll_token")
+            .apply()
+    }
+
     private fun key(): SecretKey {
         (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {

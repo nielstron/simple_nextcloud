@@ -12,11 +12,9 @@ class LoginScreenTest {
     val compose = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun showsFocusedLoginAndRequiresAllCredentials() {
+    fun showsBrowserLoginAndRequiresServerAddress() {
         compose.onNodeWithText("Your cloud. Simply.").assertIsDisplayed()
         compose.onNodeWithText("Nextcloud address").assertIsDisplayed()
-        compose.onNodeWithText("Username").assertIsDisplayed()
-        compose.onNodeWithText("App password").assertIsDisplayed()
-        compose.onNodeWithText("Connect").assertIsNotEnabled()
+        compose.onNodeWithText("Log in with browser").assertIsNotEnabled()
     }
 }

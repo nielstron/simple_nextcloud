@@ -58,8 +58,6 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Upload
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -102,7 +100,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -131,7 +128,16 @@ fun GoodNextcloudApp(
     onSharedUrisConsumed: () -> Unit = {},
 ) {
     if (state.account == null) {
-        LoginScreen(state.loading, state.error, model::connect, model::clearNotice)
+        LoginScreen(
+            loading = state.loading,
+            waiting = state.loginWaiting,
+            error = state.error,
+            loginUrl = state.loginUrl,
+            onConnect = model::startBrowserLogin,
+            onLoginUrlOpened = model::consumeLoginUrl,
+            onCancel = model::cancelBrowserLogin,
+            onClearError = model::clearNotice,
+        )
     } else {
         FilesScreen(state, model, sharedUris, onSharedUrisConsumed)
     }
@@ -140,14 +146,22 @@ fun GoodNextcloudApp(
 @Composable
 private fun LoginScreen(
     loading: Boolean,
+    waiting: Boolean,
     error: String?,
-    onConnect: (String, String, String) -> Unit,
+    loginUrl: String?,
+    onConnect: (String) -> Unit,
+    onLoginUrlOpened: () -> Unit,
+    onCancel: () -> Unit,
     onClearError: () -> Unit,
 ) {
     var server by remember { mutableStateOf("") }
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    LaunchedEffect(loginUrl) {
+        loginUrl?.let { url ->
+            context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+            onLoginUrlOpened()
+        }
+    }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.Center) {
@@ -174,31 +188,6 @@ private fun LoginScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     shape = RoundedCornerShape(14.dp),
                 )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = { username = it; onClearError() },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Username") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it; onClearError() },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("App password") },
-                    supportingText = { Text("Create one in Nextcloud → Personal settings → Security") },
-                    singleLine = true,
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { showPassword = !showPassword }) {
-                            Icon(if (showPassword) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility, "Show password")
-                        }
-                    },
-                    shape = RoundedCornerShape(14.dp),
-                )
                 AnimatedVisibility(error != null) {
                     Text(
                         error.orEmpty(),
@@ -208,16 +197,19 @@ private fun LoginScreen(
                     )
                 }
                 Button(
-                    onClick = { onConnect(server, username, password) },
-                    enabled = !loading && server.isNotBlank() && username.isNotBlank() && password.isNotBlank(),
+                    onClick = { onConnect(server) },
+                    enabled = !loading && !waiting && server.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().padding(top = 20.dp).height(52.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) {
                     if (loading) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                    else Text("Connect", fontWeight = FontWeight.SemiBold)
+                    else Text(if (waiting) "Waiting for approval…" else "Log in with browser", fontWeight = FontWeight.SemiBold)
+                }
+                AnimatedVisibility(waiting) {
+                    TextButton(onClick = onCancel) { Text("Cancel") }
                 }
                 Text(
-                    "Credentials are encrypted with Android Keystore and stay on this device.",
+                    "Nextcloud creates a revocable app password after you approve access in the browser.",
                     Modifier.padding(top = 18.dp),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -336,7 +328,12 @@ private fun FilesScreen(
                     }
                 },
                 navigationIcon = {
-                    Icon(Icons.Outlined.Cloud, null, Modifier.padding(start = 18.dp).size(28.dp), tint = MaterialTheme.colorScheme.primary)
+                    Icon(
+                        Icons.Outlined.Cloud,
+                        null,
+                        Modifier.padding(start = 18.dp, end = 10.dp).size(28.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
                 },
                 actions = {
                     IconButton(onClick = model::refresh) { Icon(Icons.Outlined.Refresh, "Refresh") }
