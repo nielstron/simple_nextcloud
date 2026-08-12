@@ -4,14 +4,21 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,6 +26,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,6 +45,7 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
@@ -62,6 +71,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,12 +87,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import ch.niels.goodnextcloud.FileUiState
 import ch.niels.goodnextcloud.FileViewModel
 import ch.niels.goodnextcloud.data.CloudFile
@@ -213,13 +228,24 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
     }
 
     BackHandler(enabled = state.path.isNotEmpty(), onBack = model::up)
-    LaunchedEffect(state.error, state.message, state.shareUrl) {
+    LaunchedEffect(state.error, state.message, state.shareUrl, state.downloadedUri) {
         state.shareUrl?.let { url ->
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(ClipData.newPlainText("Nextcloud share link", url))
         }
-        (state.error ?: state.message)?.let {
-            snackbar.showSnackbar(it)
+        (state.error ?: state.message)?.let { notice ->
+            val result = snackbar.showSnackbar(
+                message = notice,
+                actionLabel = if (state.downloadedUri != null) "Open" else null,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                val uri = requireNotNull(state.downloadedUri)
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, state.downloadedMimeType ?: "*/*")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                )
+            }
             model.clearNotice()
         }
     }
@@ -291,7 +317,13 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
                         }
                         FileRow(
                             file = file,
-                            onOpen = { if (file.isFolder) model.open(file) else download?.invoke() },
+                            onOpen = {
+                                when {
+                                    file.isFolder -> model.open(file)
+                                    file.mimeType?.startsWith("image/") == true -> model.showPreview(file)
+                                    else -> download?.invoke()
+                                }
+                            },
                             onShare = { sharing = file },
                             onDownload = download,
                         )
@@ -325,6 +357,27 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
             },
         )
     }
+
+    state.previewFile?.let { file ->
+        FullScreenImagePreview(
+            files = state.files.filter { it.mimeType?.startsWith("image/") == true },
+            currentFile = file,
+            bytes = state.previewBytes,
+            loading = state.previewLoading,
+            error = state.previewError,
+            onSelect = model::showPreview,
+            onDismiss = model::closePreview,
+            onShare = {
+                model.closePreview()
+                sharing = file
+            },
+            onDownload = {
+                model.closePreview()
+                pendingDownload = file
+                downloadLauncher.launch(file.name)
+            },
+        )
+    }
 }
 
 @Composable
@@ -350,8 +403,110 @@ private fun FileRow(file: CloudFile, onOpen: () -> Unit, onShare: () -> Unit, on
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        IconButton(onClick = onShare) { Icon(Icons.Outlined.Share, "Share ${file.name}") }
-        if (onDownload != null) IconButton(onClick = onDownload) { Icon(Icons.Outlined.Download, "Download ${file.name}") }
+        Row {
+            IconButton(onClick = onShare, modifier = Modifier.size(42.dp)) {
+                Icon(Icons.Outlined.Share, "Share ${file.name}")
+            }
+            if (onDownload != null) {
+                IconButton(onClick = onDownload, modifier = Modifier.size(42.dp)) {
+                    Icon(Icons.Outlined.Download, "Download ${file.name}")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FullScreenImagePreview(
+    files: List<CloudFile>,
+    currentFile: CloudFile,
+    bytes: ByteArray?,
+    loading: Boolean,
+    error: String?,
+    onSelect: (CloudFile) -> Unit,
+    onDismiss: () -> Unit,
+    onShare: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val initialPage = files.indexOfFirst { it.path == currentFile.path }.coerceAtLeast(0)
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { files.size })
+    val bitmap = remember(bytes) {
+        bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    LaunchedEffect(pagerState.currentPage) {
+        val selected = files[pagerState.currentPage]
+        if (selected.path != currentFile.path) onSelect(selected)
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+                key = { files[it].path },
+            ) { page ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    if (files[page].path == currentFile.path) {
+                        when {
+                            loading -> CircularProgressIndicator(color = Color.White)
+                            error != null -> Text(
+                                error,
+                                modifier = Modifier.padding(32.dp),
+                                color = Color(0xFFFFB4AB),
+                            )
+                            bitmap != null -> Image(
+                                bitmap = bitmap,
+                                contentDescription = "Preview of ${currentFile.name}",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit,
+                            )
+                            else -> Text("Preview unavailable", color = Color.White)
+                        }
+                    } else {
+                        CircularProgressIndicator(color = Color.White)
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .padding(start = 8.dp, end = 16.dp, top = 36.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, "Close", tint = Color.White) }
+                Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                    Text(currentFile.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${pagerState.currentPage + 1} of ${files.size}",
+                        color = Color.White.copy(alpha = 0.72f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .navigationBarsPadding()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Outlined.Share, null, tint = Color.White)
+                    Text("Share", Modifier.padding(start = 8.dp), color = Color.White)
+                }
+                Button(onClick = onDownload, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Outlined.Download, null)
+                    Text("Download", Modifier.padding(start = 8.dp))
+                }
+            }
+        }
     }
 }
 

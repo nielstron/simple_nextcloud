@@ -34,6 +34,12 @@ data class FileUiState(
     val shareUsers: List<ShareUser> = emptyList(),
     val shareUsersLoading: Boolean = false,
     val shareUsersError: String? = null,
+    val previewFile: CloudFile? = null,
+    val previewBytes: ByteArray? = null,
+    val previewLoading: Boolean = false,
+    val previewError: String? = null,
+    val downloadedUri: Uri? = null,
+    val downloadedMimeType: String? = null,
 )
 
 class FileViewModel(application: Application) : AndroidViewModel(application) {
@@ -44,6 +50,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var prefetchJob: Job? = null
     private var prefetchTarget: String? = null
     private var shareUserSearchJob: Job? = null
+    private var previewJob: Job? = null
     private val _state = MutableStateFlow(FileUiState(account = store.load()))
     val state = _state.asStateFlow()
 
@@ -177,8 +184,25 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun download(resolver: ContentResolver, file: CloudFile, uri: Uri) = launchAction("${file.name} downloaded") {
-        client.download(requireNotNull(_state.value.account), file, resolver, uri)
+    fun download(resolver: ContentResolver, file: CloudFile, uri: Uri) {
+        val account = _state.value.account ?: return
+        _state.update { it.copy(loading = true, error = null, downloadedUri = null, downloadedMimeType = null) }
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { client.download(account, file, resolver, uri) } }
+                .onSuccess {
+                    _state.update {
+                        it.copy(
+                            loading = false,
+                            message = "${file.name} downloaded",
+                            downloadedUri = uri,
+                            downloadedMimeType = file.mimeType,
+                        )
+                    }
+                }
+                .onFailure { failure ->
+                    _state.update { it.copy(loading = false, error = failure.userMessage()) }
+                }
+        }
     }
 
     fun share(file: CloudFile, shareWith: String?) {
@@ -244,15 +268,42 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(shareUsers = emptyList(), shareUsersLoading = false, shareUsersError = null) }
     }
 
-    fun clearNotice() = _state.update { it.copy(error = null, message = null, shareUrl = null) }
-
-    private fun launchAction(successMessage: String, action: () -> Unit) {
-        _state.update { it.copy(loading = true, error = null) }
-        viewModelScope.launch {
-            runCatching { withContext(Dispatchers.IO) { action() } }
-                .onSuccess { _state.update { it.copy(loading = false, message = successMessage) } }
-                .onFailure { failure -> _state.update { it.copy(loading = false, error = failure.userMessage()) } }
+    fun showPreview(file: CloudFile) {
+        val account = _state.value.account ?: return
+        previewJob?.cancel()
+        _state.update {
+            it.copy(previewFile = file, previewBytes = null, previewLoading = true, previewError = null)
         }
+        previewJob = viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { client.preview(account, file) } }
+                .onSuccess { bytes ->
+                    if (_state.value.previewFile?.path == file.path) {
+                        _state.update { it.copy(previewBytes = bytes, previewLoading = false) }
+                    }
+                }
+                .onFailure { failure ->
+                    if (_state.value.previewFile?.path == file.path) {
+                        _state.update { it.copy(previewLoading = false, previewError = failure.userMessage()) }
+                    }
+                }
+        }
+    }
+
+    fun closePreview() {
+        previewJob?.cancel()
+        _state.update {
+            it.copy(previewFile = null, previewBytes = null, previewLoading = false, previewError = null)
+        }
+    }
+
+    fun clearNotice() = _state.update {
+        it.copy(
+            error = null,
+            message = null,
+            shareUrl = null,
+            downloadedUri = null,
+            downloadedMimeType = null,
+        )
     }
 
     /**

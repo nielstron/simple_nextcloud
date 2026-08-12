@@ -19,10 +19,13 @@ import org.xmlpull.v1.XmlPullParser
 class NextcloudClient(
     private val http: OkHttpClient = OkHttpClient(),
 ) {
+    @Volatile
+    private var previewServiceFailed = false
+
     fun list(account: Account, path: String): List<CloudFile> {
         val body = """<?xml version="1.0"?>
-            <d:propfind xmlns:d="DAV:">
-              <d:prop><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/><d:getetag/></d:prop>
+            <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+              <d:prop><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/><d:getetag/><oc:fileid/></d:prop>
             </d:propfind>""".trimIndent()
         val request = authenticated(account, NextcloudPath.davUrl(account, path))
             .method("PROPFIND", body.toRequestBody("application/xml".toMediaTypeOrNull()))
@@ -65,6 +68,31 @@ class NextcloudClient(
         http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
             resolver.openOutputStream(target)!!.use { output -> response.body.byteStream().copyTo(output) }
+        }
+    }
+
+    fun preview(account: Account, file: CloudFile): ByteArray {
+        fun original() = responseBytes(
+            authenticated(account, NextcloudPath.davUrl(account, file.path)).get().build(),
+        )
+        if (file.mimeType == "image/webp" || previewServiceFailed) return original()
+        val fileId = requireNotNull(file.fileId) { "Nextcloud did not provide a file ID for ${file.name}" }
+        val url = "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/core/preview"
+            .toHttpUrl()
+            .newBuilder()
+            .addQueryParameter("fileId", fileId)
+            .addQueryParameter("x", "1200")
+            .addQueryParameter("y", "1200")
+            .addQueryParameter("a", "1")
+            .addQueryParameter("mode", "fit")
+            .addQueryParameter("forceIcon", "0")
+            .build()
+        val request = authenticated(account, url.toString()).get().build()
+        return try {
+            responseBytes(request)
+        } catch (failure: NextcloudException) {
+            if (failure.statusCode >= 500) previewServiceFailed = true
+            original()
         }
     }
 
@@ -166,6 +194,11 @@ class NextcloudClient(
         }
     }
 
+    private fun responseBytes(request: Request): ByteArray = http.newCall(request).execute().use { response ->
+        if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
+        response.body.bytes()
+    }
+
     private fun parseFiles(input: java.io.InputStream, username: String): List<CloudFile> {
         val parser = Xml.newPullParser().apply {
             setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
@@ -184,6 +217,7 @@ class NextcloudClient(
                     "getcontenttype" -> current.mime = parser.nextText().ifBlank { null }
                     "getlastmodified" -> current.modified = parser.nextText().ifBlank { null }
                     "getetag" -> current.etag = parser.nextText().trim('"').ifBlank { null }
+                    "fileid" -> current.fileId = parser.nextText().ifBlank { null }
                 }
             } else if (event == XmlPullParser.END_TAG && parser.name.equals("response", true)) {
                 current.toFile(username)?.let(files::add)
@@ -200,11 +234,12 @@ class NextcloudClient(
         var mime: String? = null,
         var modified: String? = null,
         var etag: String? = null,
+        var fileId: String? = null,
     ) {
         fun toFile(username: String): CloudFile? {
             val path = href?.let { NextcloudPath.relativePathFromDavHref(it, username) } ?: return null
             val name = path.substringAfterLast('/', path)
-            return CloudFile(name, path, folder, size, mime, modified, etag)
+            return CloudFile(name, path, folder, size, mime, modified, etag, fileId)
         }
     }
 }

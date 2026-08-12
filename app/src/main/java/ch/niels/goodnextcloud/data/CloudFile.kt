@@ -8,6 +8,7 @@ data class CloudFile(
     val mimeType: String?,
     val modifiedAt: String?,
     val etag: String?,
+    val fileId: String? = null,
 )
 
 data class Account(
