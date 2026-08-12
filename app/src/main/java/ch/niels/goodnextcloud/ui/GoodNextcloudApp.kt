@@ -160,7 +160,7 @@ private fun LoginScreen(
                 Spacer(Modifier.height(24.dp))
                 Text("Your cloud. Simply.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    "Browse, share and move files without the clutter.",
+                    "Browse, download, and share files.",
                     Modifier.padding(top = 8.dp, bottom = 28.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

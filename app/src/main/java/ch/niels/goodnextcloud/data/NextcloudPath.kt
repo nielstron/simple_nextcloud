@@ -5,7 +5,14 @@ import java.net.URI
 import java.net.URLDecoder
 
 object NextcloudPath {
-    fun normalizeServerUrl(value: String): String = value.trim().trimEnd('/')
+    fun normalizeServerUrl(value: String): String {
+        val trimmed = value.trim().trimEnd('/')
+        return when {
+            trimmed.isEmpty() -> ""
+            "://" !in trimmed -> "https://$trimmed"
+            else -> trimmed
+        }
+    }
 
     fun encodePath(path: String): String = path
         .split('/')

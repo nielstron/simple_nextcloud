@@ -3,6 +3,7 @@ package ch.niels.goodnextcloud.data
 import android.content.ContentResolver
 import android.net.Uri
 import java.io.OutputStream
+import java.io.File
 import android.util.Xml
 import okhttp3.Credentials
 import okhttp3.FormBody
@@ -12,6 +13,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okio.BufferedSink
 import okio.source
 import org.json.JSONObject
@@ -59,6 +61,15 @@ class NextcloudClient(
             authenticated(account, NextcloudPath.davUrl(account, path))
                 .put(body)
                 .header("If-None-Match", "*")
+                .build(),
+            setOf(200, 201, 204),
+        )
+    }
+
+    fun upload(account: Account, path: String, source: File, mimeType: String?) {
+        executeEmpty(
+            authenticated(account, NextcloudPath.davUrl(account, path))
+                .put(source.asRequestBody(mimeType?.toMediaTypeOrNull()))
                 .build(),
             setOf(200, 201, 204),
         )

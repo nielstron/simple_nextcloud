@@ -21,6 +21,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <provider
+            android:name=".NextcloudDocumentsProvider"
+            android:authorities="${applicationId}.documents"
+            android:enabled="true"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:label="Nextcloud"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
         <activity
             android:name=".MainActivity"
             android:exported="true"

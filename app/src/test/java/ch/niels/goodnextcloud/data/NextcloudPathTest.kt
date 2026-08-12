@@ -7,6 +7,17 @@ class NextcloudPathTest {
     private val account = Account("https://cloud.example.com/", "niels@example.com", "secret")
 
     @Test
+    fun `prefixes a bare server address with https`() {
+        assertEquals("https://cloud.example.com", NextcloudPath.normalizeServerUrl(" cloud.example.com/ "))
+    }
+
+    @Test
+    fun `keeps an explicit scheme`() {
+        assertEquals("https://cloud.example.com", NextcloudPath.normalizeServerUrl("https://cloud.example.com/"))
+        assertEquals("http://localhost:8080", NextcloudPath.normalizeServerUrl("http://localhost:8080/"))
+    }
+
+    @Test
     fun `builds an encoded dav url`() {
         assertEquals(
             "https://cloud.example.com/remote.php/dav/files/niels%40example.com/Work%20files/report%20%231.pdf",
