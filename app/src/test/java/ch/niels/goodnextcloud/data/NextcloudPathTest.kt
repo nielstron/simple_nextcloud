@@ -20,6 +20,19 @@ class NextcloudPathTest {
     }
 
     @Test
+    fun `builds selectable breadcrumbs from root to the current folder`() {
+        assertEquals(
+            listOf(
+                "All files" to "",
+                "Projects" to "Projects",
+                "Client" to "Projects/Client",
+                "Drafts" to "Projects/Client/Drafts",
+            ),
+            NextcloudPath.breadcrumbs("/Projects/Client/Drafts/"),
+        )
+    }
+
+    @Test
     fun `extracts a top level folder path from a dav href`() {
         assertEquals(
             "Documents",

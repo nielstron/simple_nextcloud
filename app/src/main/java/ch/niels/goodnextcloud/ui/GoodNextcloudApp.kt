@@ -36,7 +36,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
 import androidx.compose.material.icons.automirrored.outlined.Logout
@@ -114,6 +113,7 @@ import ch.niels.goodnextcloud.UploadQueueItem
 import ch.niels.goodnextcloud.UploadStatus
 import ch.niels.goodnextcloud.data.CloudFile
 import ch.niels.goodnextcloud.data.LinkShareOptions
+import ch.niels.goodnextcloud.data.NextcloudPath
 import ch.niels.goodnextcloud.data.ShareUser
 import java.time.LocalDate
 import java.time.ZonedDateTime
@@ -123,11 +123,16 @@ import kotlin.math.pow
 import kotlinx.coroutines.delay
 
 @Composable
-fun GoodNextcloudApp(state: FileUiState, model: FileViewModel) {
+fun GoodNextcloudApp(
+    state: FileUiState,
+    model: FileViewModel,
+    sharedUris: List<android.net.Uri> = emptyList(),
+    onSharedUrisConsumed: () -> Unit = {},
+) {
     if (state.account == null) {
         LoginScreen(state.loading, state.error, model::connect, model::clearNotice)
     } else {
-        FilesScreen(state, model)
+        FilesScreen(state, model, sharedUris, onSharedUrisConsumed)
     }
 }
 
@@ -223,9 +228,15 @@ private fun LoginScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FilesScreen(state: FileUiState, model: FileViewModel) {
+private fun FilesScreen(
+    state: FileUiState,
+    model: FileViewModel,
+    sharedUris: List<android.net.Uri>,
+    onSharedUrisConsumed: () -> Unit,
+) {
     var search by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
+    var breadcrumbMenuOpen by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf<CloudFile?>(null) }
     var pendingDownload by remember { mutableStateOf<CloudFile?>(null) }
     var deleteTarget by remember { mutableStateOf<CloudFile?>(null) }
@@ -252,7 +263,7 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
         pendingDownload = null
     }
 
-    BackHandler(enabled = state.path.isNotEmpty(), onBack = model::up)
+    BackHandler(enabled = sharedUris.isEmpty() && state.path.isNotEmpty(), onBack = model::up)
     LaunchedEffect(state.error, state.message, state.shareUrl, state.downloadedUri) {
         state.shareUrl?.let { url ->
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -280,20 +291,36 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(if (state.path.isEmpty()) "All files" else state.path.substringAfterLast('/'), fontWeight = FontWeight.SemiBold)
-                        Text(
-                            if (state.path.isEmpty()) state.account?.serverUrl.orEmpty() else "/${state.path}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    Box {
+                        Column(Modifier.clickable { breadcrumbMenuOpen = true }) {
+                            Text(if (state.path.isEmpty()) "All files" else state.path.substringAfterLast('/'), fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (state.path.isEmpty()) state.account?.serverUrl.orEmpty() else "/${state.path}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = breadcrumbMenuOpen,
+                            onDismissRequest = { breadcrumbMenuOpen = false },
+                        ) {
+                            NextcloudPath.breadcrumbs(state.path).forEach { (label, path) ->
+                                DropdownMenuItem(
+                                    text = { Text(label) },
+                                    leadingIcon = { Icon(Icons.Outlined.Folder, null) },
+                                    onClick = {
+                                        breadcrumbMenuOpen = false
+                                        model.loadPath(path)
+                                    },
+                                )
+                            }
+                        }
                     }
                 },
                 navigationIcon = {
-                    if (state.path.isNotEmpty()) IconButton(onClick = model::up) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Up") }
-                    else Icon(Icons.Outlined.Cloud, null, Modifier.padding(start = 18.dp).size(28.dp), tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Outlined.Cloud, null, Modifier.padding(start = 18.dp).size(28.dp), tint = MaterialTheme.colorScheme.primary)
                 },
                 actions = {
                     IconButton(onClick = model::refresh) { Icon(Icons.Outlined.Refresh, "Refresh") }
@@ -380,9 +407,22 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { uploadSourceOpen = true },
-                icon = { Icon(Icons.Outlined.Upload, null) },
-                text = { Text("Upload") },
+                onClick = {
+                    if (sharedUris.isNotEmpty()) {
+                        model.enqueueFiles(resolver, sharedUris)
+                        onSharedUrisConsumed()
+                    } else {
+                        uploadSourceOpen = true
+                    }
+                },
+                icon = { Icon(if (sharedUris.isNotEmpty()) Icons.Outlined.ContentPaste else Icons.Outlined.Upload, null) },
+                text = {
+                    Text(
+                        if (sharedUris.isEmpty()) "Upload"
+                        else if (sharedUris.size == 1) "Place file here"
+                        else "Place ${sharedUris.size} files here",
+                    )
+                },
             )
         },
     ) { padding ->
@@ -404,15 +444,21 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
             val highlightedIndex = visibleFiles.indexOfFirst { it.path == state.highlightedPath }
             if (highlightedIndex >= 0) {
                 LaunchedEffect(state.highlightedPath, highlightedIndex) {
-                    fileListState.animateScrollToItem(highlightedIndex)
+                    fileListState.animateScrollToItem(highlightedIndex + if (state.path.isEmpty()) 0 else 1)
                     delay(3_000)
                     model.clearHighlight()
                 }
             }
-            if (!state.loading && visibleFiles.isEmpty()) {
+            if (!state.loading && visibleFiles.isEmpty() && state.path.isEmpty()) {
                 EmptyFolder(if (search.isBlank()) "This folder is empty" else "No matching files")
             } else {
                 LazyColumn(state = fileListState, contentPadding = PaddingValues(bottom = 96.dp)) {
+                    if (state.path.isNotEmpty()) {
+                        item(key = "parent-folder") {
+                            ParentFolderRow(onOpen = model::up)
+                            HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                    }
                     items(visibleFiles, key = { it.path }) { file ->
                         val download = fun() {
                             pendingDownload = file
@@ -532,6 +578,31 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
                 model.navigateToUpload(item)
             },
         )
+    }
+}
+
+@Composable
+private fun ParentFolderRow(onOpen: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(start = 18.dp, top = 12.dp, bottom = 12.dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Surface(
+            Modifier.size(46.dp),
+            RoundedCornerShape(13.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Folder, null, tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Text("..", fontWeight = FontWeight.Medium)
+            Text("Parent folder", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

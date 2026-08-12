@@ -22,6 +22,13 @@ object NextcloudPath {
     fun child(parent: String, name: String): String =
         listOf(parent.trim('/'), name.trim('/')).filter(String::isNotEmpty).joinToString("/")
 
+    fun breadcrumbs(path: String): List<Pair<String, String>> {
+        val segments = path.trim('/').split('/').filter(String::isNotEmpty)
+        return listOf("All files" to "") + segments.indices.map { index ->
+            segments[index] to segments.take(index + 1).joinToString("/")
+        }
+    }
+
     fun relativePathFromDavHref(href: String, username: String): String {
         val decodedPath = URLDecoder.decode(URI(href).rawPath, Charsets.UTF_8.name())
         val davFilesMarker = "/remote.php/dav/files/"
