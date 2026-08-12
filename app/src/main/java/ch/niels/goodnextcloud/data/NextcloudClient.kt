@@ -2,6 +2,7 @@ package ch.niels.goodnextcloud.data
 
 import android.content.ContentResolver
 import android.net.Uri
+import java.io.OutputStream
 import android.util.Xml
 import okhttp3.Credentials
 import okhttp3.FormBody
@@ -71,13 +72,17 @@ class NextcloudClient(
     }
 
     fun download(account: Account, file: CloudFile, resolver: ContentResolver, target: Uri) {
+        resolver.openOutputStream(target)!!.use { output -> download(account, file, output) }
+    }
+
+    fun download(account: Account, file: CloudFile, output: OutputStream) {
         val request = authenticated(account, NextcloudPath.davUrl(account, file.path))
             .get()
             .apply { if (file.isFolder) header("Accept", "application/zip") }
             .build()
         http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
-            resolver.openOutputStream(target)!!.use { output -> response.body.byteStream().copyTo(output) }
+            response.body.byteStream().copyTo(output)
         }
     }
 

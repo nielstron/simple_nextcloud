@@ -5,6 +5,7 @@ import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
+import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import ch.niels.goodnextcloud.data.Account
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class FileUiState(
     val account: Account? = null,
@@ -41,6 +43,8 @@ data class FileUiState(
     val previewError: String? = null,
     val downloadedUri: Uri? = null,
     val downloadedMimeType: String? = null,
+    val localOpenUri: Uri? = null,
+    val localOpenMimeType: String? = null,
     val clipboardFile: CloudFile? = null,
     val clipboardMode: ClipboardMode? = null,
     val uploadQueue: List<UploadQueueItem> = emptyList(),
@@ -251,6 +255,34 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 }
         }
     }
+
+    fun openLocally(file: CloudFile) {
+        val account = _state.value.account ?: return
+        val application = getApplication<Application>()
+        _state.update { it.copy(loading = true, error = null, localOpenUri = null, localOpenMimeType = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val directory = File(application.cacheDir, "opened-files").apply { mkdirs() }
+                    val localFile = File(directory, file.name)
+                    localFile.outputStream().use { output -> client.download(account, file, output) }
+                    FileProvider.getUriForFile(application, "${BuildConfig.APPLICATION_ID}.files", localFile)
+                }
+            }.onSuccess { uri ->
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        localOpenUri = uri,
+                        localOpenMimeType = file.mimeType ?: "application/octet-stream",
+                    )
+                }
+            }.onFailure { failure ->
+                _state.update { it.copy(loading = false, error = failure.userMessage()) }
+            }
+        }
+    }
+
+    fun clearLocalOpen() = _state.update { it.copy(localOpenUri = null, localOpenMimeType = null) }
 
     fun share(file: CloudFile, shareWith: String?) {
         _state.update { it.copy(loading = true, error = null) }

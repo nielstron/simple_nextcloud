@@ -1,6 +1,7 @@
 package ch.niels.goodnextcloud.ui
 
 import android.app.Application
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -285,6 +286,21 @@ private fun FilesScreen(
             model.clearNotice()
         }
     }
+    LaunchedEffect(state.localOpenUri) {
+        state.localOpenUri?.let { uri ->
+            try {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, state.localOpenMimeType ?: "application/octet-stream")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                )
+            } catch (_: ActivityNotFoundException) {
+                snackbar.showSnackbar("No installed app can open this file type")
+            } finally {
+                model.clearLocalOpen()
+            }
+        }
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -471,7 +487,7 @@ private fun FilesScreen(
                                 when {
                                     file.isFolder -> model.open(file)
                                     file.mimeType?.startsWith("image/") == true -> model.showPreview(file)
-                                    else -> download()
+                                    else -> model.openLocally(file)
                                 }
                             },
                             onDelete = { deleteTarget = file },
