@@ -20,3 +20,14 @@ data class ShareResult(
     val id: String,
     val url: String?,
 )
+
+data class LinkShareOptions(
+    val password: String = "",
+    val expireDate: String = "",
+    val allowUpload: Boolean = false,
+)
+
+data class ShareUser(
+    val id: String,
+    val displayName: String,
+)

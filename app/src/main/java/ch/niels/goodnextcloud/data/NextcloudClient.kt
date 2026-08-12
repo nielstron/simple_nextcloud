@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Xml
 import okhttp3.Credentials
 import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -73,6 +74,66 @@ class NextcloudClient(
             .add("shareType", if (shareWith.isNullOrBlank()) "3" else "0")
             .apply { if (!shareWith.isNullOrBlank()) add("shareWith", shareWith.trim()) }
             .build()
+        return createShare(account, form)
+    }
+
+    fun createLink(account: Account, path: String, options: LinkShareOptions): ShareResult {
+        val form = FormBody.Builder()
+            .add("path", "/${path.trimStart('/')}")
+            .add("shareType", "3")
+            .add("permissions", if (options.allowUpload) "15" else "1")
+            .apply {
+                if (options.password.isNotBlank()) add("password", options.password)
+                if (options.expireDate.isNotBlank()) add("expireDate", options.expireDate)
+                if (options.allowUpload) add("publicUpload", "true")
+            }
+            .build()
+        return createShare(account, form)
+    }
+
+    fun searchUsers(account: Account, query: String, itemType: String): List<ShareUser> {
+        val request = authenticated(
+            account,
+            "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v1.php/apps/files_sharing/api/v1/sharees",
+        )
+            .get()
+            .header("OCS-APIRequest", "true")
+            .header("Accept", "application/json")
+            .url(
+                "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v1.php/apps/files_sharing/api/v1/sharees"
+                    .toHttpUrl()
+                    .newBuilder()
+                    .addQueryParameter("search", query)
+                    .addQueryParameter("itemType", itemType)
+                    .addQueryParameter("perPage", "20")
+                    .addQueryParameter("lookup", "false")
+                    .build(),
+            )
+            .build()
+
+        return http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
+            parseShareUsers(response.body.string())
+        }
+    }
+
+    internal fun parseShareUsers(json: String): List<ShareUser> {
+        val data = JSONObject(json).getJSONObject("ocs").getJSONObject("data")
+        val result = buildList {
+            val exactUsers = data.getJSONObject("exact").getJSONArray("users")
+            for (index in 0 until exactUsers.length()) add(exactUsers.getJSONObject(index).toShareUser())
+            val users = data.getJSONArray("users")
+            for (index in 0 until users.length()) add(users.getJSONObject(index).toShareUser())
+        }
+        return result.distinctBy(ShareUser::id)
+    }
+
+    private fun JSONObject.toShareUser(): ShareUser {
+        val value = getJSONObject("value")
+        return ShareUser(id = value.getString("shareWith"), displayName = getString("label"))
+    }
+
+    private fun createShare(account: Account, form: FormBody): ShareResult {
         val request = authenticated(
             account,
             "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v2.php/apps/files_sharing/api/v1/shares",

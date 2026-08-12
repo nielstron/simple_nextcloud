@@ -9,6 +9,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -34,6 +36,8 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Share
@@ -42,6 +46,7 @@ import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -81,6 +86,9 @@ import androidx.compose.ui.unit.dp
 import ch.niels.goodnextcloud.FileUiState
 import ch.niels.goodnextcloud.FileViewModel
 import ch.niels.goodnextcloud.data.CloudFile
+import ch.niels.goodnextcloud.data.LinkShareOptions
+import ch.niels.goodnextcloud.data.ShareUser
+import java.time.LocalDate
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlin.math.ln
@@ -295,10 +303,27 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
     }
 
     sharing?.let { file ->
-        ShareDialog(file, { sharing = null }) { recipient ->
-            sharing = null
-            model.share(file, recipient)
-        }
+        ShareDialog(
+            file = file,
+            users = state.shareUsers,
+            usersLoading = state.shareUsersLoading,
+            usersError = state.shareUsersError,
+            onDismiss = {
+                sharing = null
+                model.clearShareUsers()
+            },
+            onSearchUsers = { query -> model.searchShareUsers(query, file.isFolder) },
+            onShareWithUser = { recipient ->
+                sharing = null
+                model.clearShareUsers()
+                model.share(file, recipient)
+            },
+            onCreateLink = { options ->
+                sharing = null
+                model.clearShareUsers()
+                model.createLink(file, options)
+            },
+        )
     }
 }
 
@@ -331,29 +356,140 @@ private fun FileRow(file: CloudFile, onOpen: () -> Unit, onShare: () -> Unit, on
 }
 
 @Composable
-private fun ShareDialog(file: CloudFile, onDismiss: () -> Unit, onShare: (String?) -> Unit) {
-    var recipient by remember { mutableStateOf("") }
+private fun ShareDialog(
+    file: CloudFile,
+    users: List<ShareUser>,
+    usersLoading: Boolean,
+    usersError: String?,
+    onDismiss: () -> Unit,
+    onSearchUsers: (String) -> Unit,
+    onShareWithUser: (String) -> Unit,
+    onCreateLink: (LinkShareOptions) -> Unit,
+) {
+    var userQuery by remember { mutableStateOf("") }
+    var selectedUser by remember { mutableStateOf<ShareUser?>(null) }
+    var password by remember { mutableStateOf("") }
+    var expiry by remember { mutableStateOf("") }
+    var allowUpload by remember { mutableStateOf(false) }
+    var showLinkOptions by remember { mutableStateOf(false) }
+    val validExpiry = expiry.isBlank() || runCatching { LocalDate.parse(expiry) >= LocalDate.now() }.getOrDefault(false)
+    LaunchedEffect(file.path) { onSearchUsers("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.Share, null) },
         title = { Text("Share ${file.name}") },
         text = {
-            Column {
-                Text("Enter a Nextcloud username, or create a public link.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("Share with a Nextcloud user", fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(
-                    value = recipient,
-                    onValueChange = { recipient = it },
+                    value = userQuery,
+                    onValueChange = {
+                        userQuery = it
+                        selectedUser = null
+                        onSearchUsers(it)
+                    },
                     modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                    label = { Text("Username (optional)") },
+                    label = { Text("Find a user") },
+                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
                     singleLine = true,
                 )
-                OutlinedButton(onClick = { onShare(null) }, Modifier.fillMaxWidth().padding(top = 12.dp)) {
-                    Text("Create public link")
+                if (usersLoading) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                } else if (usersError != null) {
+                    Text(
+                        usersError,
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else if (users.isEmpty()) {
+                    Text(
+                        if (userQuery.isBlank()) "No suggested users" else "No users found",
+                        modifier = Modifier.padding(vertical = 12.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Column(Modifier.padding(top = 6.dp)) {
+                        users.take(5).forEach { user ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedUser = user
+                                        userQuery = user.displayName
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Outlined.Person, null, tint = MaterialTheme.colorScheme.primary)
+                                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                    Text(user.displayName, fontWeight = FontWeight.Medium)
+                                    if (user.id != user.displayName) {
+                                        Text(user.id, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                if (selectedUser?.id == user.id) Icon(Icons.Outlined.Check, "Selected")
+                            }
+                        }
+                    }
+                }
+                Button(
+                    onClick = { onShareWithUser(requireNotNull(selectedUser).id) },
+                    enabled = selectedUser != null,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) { Text("Share with user") }
+
+                HorizontalDivider(Modifier.padding(vertical = 20.dp))
+                Text("Public link", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Anyone with the link can access this ${if (file.isFolder) "folder" else "file"}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = { showLinkOptions = !showLinkOptions }) {
+                    Text(if (showLinkOptions) "Hide link options" else "Link sharing options")
+                }
+                AnimatedVisibility(showLinkOptions) {
+                    Column {
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Password (optional)") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                        )
+                        OutlinedTextField(
+                            value = expiry,
+                            onValueChange = { expiry = it.trim() },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            label = { Text("Expiration date (optional)") },
+                            placeholder = { Text("YYYY-MM-DD") },
+                            supportingText = {
+                                if (!validExpiry) Text("Use today or a future date in YYYY-MM-DD format")
+                            },
+                            isError = !validExpiry,
+                            singleLine = true,
+                        )
+                        if (file.isFolder) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = allowUpload, onCheckedChange = { allowUpload = it })
+                                Text("Allow recipients to upload")
+                            }
+                        }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { onCreateLink(LinkShareOptions(password, expiry, allowUpload)) },
+                    enabled = validExpiry,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) {
+                    Text("Create and copy link")
                 }
             }
         },
-        confirmButton = { Button(onClick = { onShare(recipient) }, enabled = recipient.isNotBlank()) { Text("Share") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
     )
 }
 

@@ -10,10 +10,13 @@ import ch.niels.goodnextcloud.data.Account
 import ch.niels.goodnextcloud.data.AccountStore
 import ch.niels.goodnextcloud.data.CloudFile
 import ch.niels.goodnextcloud.data.FolderListingCache
+import ch.niels.goodnextcloud.data.LinkShareOptions
 import ch.niels.goodnextcloud.data.NextcloudClient
 import ch.niels.goodnextcloud.data.NextcloudPath
+import ch.niels.goodnextcloud.data.ShareUser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -28,6 +31,9 @@ data class FileUiState(
     val error: String? = null,
     val message: String? = null,
     val shareUrl: String? = null,
+    val shareUsers: List<ShareUser> = emptyList(),
+    val shareUsersLoading: Boolean = false,
+    val shareUsersError: String? = null,
 )
 
 class FileViewModel(application: Application) : AndroidViewModel(application) {
@@ -37,6 +43,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var navigationJob: Job? = null
     private var prefetchJob: Job? = null
     private var prefetchTarget: String? = null
+    private var shareUserSearchJob: Job? = null
     private val _state = MutableStateFlow(FileUiState(account = store.load()))
     val state = _state.asStateFlow()
 
@@ -195,6 +202,48 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun createLink(file: CloudFile, options: LinkShareOptions) {
+        _state.update { it.copy(loading = true, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    client.createLink(requireNotNull(_state.value.account), file.path, options)
+                }
+            }.onSuccess { result ->
+                _state.update {
+                    it.copy(loading = false, message = "Public link copied", shareUrl = result.url)
+                }
+            }.onFailure { failure ->
+                _state.update { it.copy(loading = false, error = failure.userMessage()) }
+            }
+        }
+    }
+
+    fun searchShareUsers(query: String, isFolder: Boolean) {
+        val account = _state.value.account ?: return
+        shareUserSearchJob?.cancel()
+        _state.update { it.copy(shareUsersLoading = true, shareUsersError = null) }
+        shareUserSearchJob = viewModelScope.launch {
+            if (query.isNotBlank()) delay(USER_SEARCH_DEBOUNCE_MILLIS)
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    client.searchUsers(account, query.trim(), if (isFolder) "folder" else "file")
+                }
+            }.onSuccess { users ->
+                _state.update { it.copy(shareUsers = users, shareUsersLoading = false) }
+            }.onFailure { failure ->
+                _state.update {
+                    it.copy(shareUsers = emptyList(), shareUsersLoading = false, shareUsersError = failure.userMessage())
+                }
+            }
+        }
+    }
+
+    fun clearShareUsers() {
+        shareUserSearchJob?.cancel()
+        _state.update { it.copy(shareUsers = emptyList(), shareUsersLoading = false, shareUsersError = null) }
+    }
+
     fun clearNotice() = _state.update { it.copy(error = null, message = null, shareUrl = null) }
 
     private fun launchAction(successMessage: String, action: () -> Unit) {
@@ -243,6 +292,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val PREFETCH_FOLDER_LIMIT = 2
+        const val USER_SEARCH_DEBOUNCE_MILLIS = 250L
     }
 }
 
