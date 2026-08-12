@@ -63,12 +63,53 @@ class NextcloudClient(
         )
     }
 
+    fun createFolder(account: Account, path: String) {
+        executeEmpty(
+            authenticated(account, NextcloudPath.davUrl(account, path)).method("MKCOL", null).build(),
+            setOf(201),
+        )
+    }
+
     fun download(account: Account, file: CloudFile, resolver: ContentResolver, target: Uri) {
-        val request = authenticated(account, NextcloudPath.davUrl(account, file.path)).get().build()
+        val request = authenticated(account, NextcloudPath.davUrl(account, file.path))
+            .get()
+            .apply { if (file.isFolder) header("Accept", "application/zip") }
+            .build()
         http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
             resolver.openOutputStream(target)!!.use { output -> response.body.byteStream().copyTo(output) }
         }
+    }
+
+    fun delete(account: Account, file: CloudFile) {
+        executeEmpty(
+            authenticated(account, NextcloudPath.davUrl(account, file.path)).delete().build(),
+            setOf(204),
+        )
+    }
+
+    fun copy(account: Account, file: CloudFile, destinationFolder: String) {
+        transfer("COPY", account, file, NextcloudPath.child(destinationFolder, file.name))
+    }
+
+    fun move(account: Account, file: CloudFile, destinationFolder: String) {
+        transfer("MOVE", account, file, NextcloudPath.child(destinationFolder, file.name))
+    }
+
+    fun rename(account: Account, file: CloudFile, newName: String) {
+        val parent = file.path.substringBeforeLast('/', "")
+        transfer("MOVE", account, file, NextcloudPath.child(parent, newName))
+    }
+
+    private fun transfer(method: String, account: Account, file: CloudFile, destinationPath: String) {
+        executeEmpty(
+            authenticated(account, NextcloudPath.davUrl(account, file.path))
+                .method(method, null)
+                .header("Destination", NextcloudPath.davUrl(account, destinationPath))
+                .header("Overwrite", "F")
+                .build(),
+            setOf(201, 204),
+        )
     }
 
     fun preview(account: Account, file: CloudFile): ByteArray {

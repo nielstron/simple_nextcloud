@@ -5,6 +5,8 @@ A deliberately small Android Nextcloud client for three workflows:
 - Navigate folders and search the current folder.
 - Upload through Android's system document picker and download through the system save dialog.
 - Share with another Nextcloud user or create a public link.
+- Copy or move with a navigation clipboard; rename, delete, and download folders as ZIP archives.
+- Queue multiple-file and recursive folder uploads while continuing to browse.
 
 Folder listings are kept briefly in a bounded, memory-only cache so back navigation and repeat visits are immediate. As soon as a folder opens, the app prefetches metadata for up to two likely next folders based on recent and frequent visits. Opening the active target adopts its in-flight request; navigating elsewhere cancels it. The app never caches or prefetches file contents.
 

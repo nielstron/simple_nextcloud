@@ -26,20 +26,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
+import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.MoreVert
@@ -54,6 +61,8 @@ import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -100,6 +109,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import ch.niels.goodnextcloud.FileUiState
 import ch.niels.goodnextcloud.FileViewModel
+import ch.niels.goodnextcloud.ClipboardMode
+import ch.niels.goodnextcloud.UploadQueueItem
+import ch.niels.goodnextcloud.UploadStatus
 import ch.niels.goodnextcloud.data.CloudFile
 import ch.niels.goodnextcloud.data.LinkShareOptions
 import ch.niels.goodnextcloud.data.ShareUser
@@ -108,6 +120,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlin.math.ln
 import kotlin.math.pow
+import kotlinx.coroutines.delay
 
 @Composable
 fun GoodNextcloudApp(state: FileUiState, model: FileViewModel) {
@@ -215,11 +228,23 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
     var menuOpen by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf<CloudFile?>(null) }
     var pendingDownload by remember { mutableStateOf<CloudFile?>(null) }
+    var deleteTarget by remember { mutableStateOf<CloudFile?>(null) }
+    var renameTarget by remember { mutableStateOf<CloudFile?>(null) }
+    var clipboardMenuOpen by remember { mutableStateOf(false) }
+    var uploadSourceOpen by remember { mutableStateOf(false) }
+    var uploadQueueOpen by remember { mutableStateOf(false) }
+    val fileListState = rememberLazyListState()
     val snackbar = remember { SnackbarHostState() }
+    val unfinishedUploadCount = state.uploadQueue.count {
+        it.status == UploadStatus.QUEUED || it.status == UploadStatus.UPLOADING
+    }
     val context = LocalContext.current
     val resolver = model.getApplication<Application>().contentResolver
-    val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { model.upload(resolver, it) }
+    val filesUploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) model.enqueueFiles(resolver, uris)
+    }
+    val folderUploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let { model.enqueueFolder(resolver, it) }
     }
     val downloadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         val file = pendingDownload
@@ -272,9 +297,76 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
                 },
                 actions = {
                     IconButton(onClick = model::refresh) { Icon(Icons.Outlined.Refresh, "Refresh") }
+                    state.clipboardFile?.let { clipboardFile ->
+                        val sourceParent = clipboardFile.path.substringBeforeLast('/', "")
+                        val insideSource = clipboardFile.isFolder &&
+                            (state.path == clipboardFile.path || state.path.startsWith("${clipboardFile.path}/"))
+                        val canPaste = state.path != sourceParent && !insideSource
+                        Box {
+                            IconButton(onClick = { clipboardMenuOpen = true }) {
+                                Icon(Icons.Outlined.ContentPaste, "Clipboard")
+                            }
+                            DropdownMenu(
+                                expanded = clipboardMenuOpen,
+                                onDismissRequest = { clipboardMenuOpen = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(clipboardFile.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(
+                                                state.clipboardMode?.name?.lowercase().orEmpty(),
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                        }
+                                    },
+                                    leadingIcon = { Icon(Icons.Outlined.ContentPaste, null) },
+                                    enabled = false,
+                                    onClick = {},
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Paste here") },
+                                    leadingIcon = { Icon(Icons.Outlined.ContentPaste, null) },
+                                    enabled = canPaste,
+                                    onClick = { clipboardMenuOpen = false; model.paste() },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Clear clipboard") },
+                                    leadingIcon = { Icon(Icons.Outlined.Close, null) },
+                                    onClick = { clipboardMenuOpen = false; model.clearClipboard() },
+                                )
+                            }
+                        }
+                    }
                     Box {
-                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Outlined.MoreVert, "More") }
+                        IconButton(onClick = { menuOpen = true }) {
+                            BadgedBox(
+                                badge = {
+                                    if (unfinishedUploadCount > 0) {
+                                        Badge {
+                                            Text(if (unfinishedUploadCount > 99) "99+" else unfinishedUploadCount.toString())
+                                        }
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    Icons.Outlined.MoreVert,
+                                    if (unfinishedUploadCount == 0) "More"
+                                    else "More, $unfinishedUploadCount unfinished uploads",
+                                )
+                            }
+                        }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (unfinishedUploadCount > 0) "Upload queue ($unfinishedUploadCount active)"
+                                        else "Upload queue",
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Outlined.Upload, null) },
+                                onClick = { menuOpen = false; uploadQueueOpen = true },
+                            )
                             DropdownMenuItem(
                                 text = { Text("Disconnect") },
                                 leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Logout, null) },
@@ -288,7 +380,7 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { uploadLauncher.launch(arrayOf("*/*")) },
+                onClick = { uploadSourceOpen = true },
                 icon = { Icon(Icons.Outlined.Upload, null) },
                 text = { Text("Upload") },
             )
@@ -306,24 +398,40 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
                 shape = RoundedCornerShape(16.dp),
             )
             val visibleFiles = state.files.filter { it.name.contains(search, ignoreCase = true) }
+            LaunchedEffect(state.highlightedPath) {
+                if (state.highlightedPath != null) search = ""
+            }
+            val highlightedIndex = visibleFiles.indexOfFirst { it.path == state.highlightedPath }
+            if (highlightedIndex >= 0) {
+                LaunchedEffect(state.highlightedPath, highlightedIndex) {
+                    fileListState.animateScrollToItem(highlightedIndex)
+                    delay(3_000)
+                    model.clearHighlight()
+                }
+            }
             if (!state.loading && visibleFiles.isEmpty()) {
                 EmptyFolder(if (search.isBlank()) "This folder is empty" else "No matching files")
             } else {
-                LazyColumn(contentPadding = PaddingValues(bottom = 96.dp)) {
+                LazyColumn(state = fileListState, contentPadding = PaddingValues(bottom = 96.dp)) {
                     items(visibleFiles, key = { it.path }) { file ->
-                        val download = if (file.isFolder) null else fun() {
+                        val download = fun() {
                             pendingDownload = file
-                            downloadLauncher.launch(file.name)
+                            downloadLauncher.launch(if (file.isFolder) "${file.name}.zip" else file.name)
                         }
                         FileRow(
                             file = file,
+                            highlighted = file.path == state.highlightedPath,
                             onOpen = {
                                 when {
                                     file.isFolder -> model.open(file)
                                     file.mimeType?.startsWith("image/") == true -> model.showPreview(file)
-                                    else -> download?.invoke()
+                                    else -> download()
                                 }
                             },
+                            onDelete = { deleteTarget = file },
+                            onCopy = { model.stageTransfer(file, ClipboardMode.COPY) },
+                            onMove = { model.stageTransfer(file, ClipboardMode.MOVE) },
+                            onRename = { renameTarget = file },
                             onShare = { sharing = file },
                             onDownload = download,
                         )
@@ -377,12 +485,78 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
             },
         )
     }
+
+    deleteTarget?.let { file ->
+        DeleteDialog(
+            file = file,
+            onDismiss = { deleteTarget = null },
+            onConfirm = {
+                deleteTarget = null
+                model.delete(file)
+            },
+        )
+    }
+
+    renameTarget?.let { file ->
+        RenameDialog(
+            file = file,
+            onDismiss = { renameTarget = null },
+            onConfirm = { newName ->
+                renameTarget = null
+                model.rename(file, newName)
+            },
+        )
+    }
+
+    if (uploadSourceOpen) {
+        UploadSourceDialog(
+            onDismiss = { uploadSourceOpen = false },
+            onFiles = {
+                uploadSourceOpen = false
+                filesUploadLauncher.launch(arrayOf("*/*"))
+            },
+            onFolder = {
+                uploadSourceOpen = false
+                folderUploadLauncher.launch(null)
+            },
+        )
+    }
+
+    if (uploadQueueOpen) {
+        UploadQueueDialog(
+            items = state.uploadQueue,
+            onDismiss = { uploadQueueOpen = false },
+            onClearFinished = model::clearFinishedUploads,
+            onOpenItem = { item ->
+                uploadQueueOpen = false
+                model.navigateToUpload(item)
+            },
+        )
+    }
 }
 
 @Composable
-private fun FileRow(file: CloudFile, onOpen: () -> Unit, onShare: () -> Unit, onDownload: (() -> Unit)?) {
+private fun FileRow(
+    file: CloudFile,
+    highlighted: Boolean,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+    onCopy: () -> Unit,
+    onMove: () -> Unit,
+    onRename: () -> Unit,
+    onShare: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    var optionsOpen by remember { mutableStateOf(false) }
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(start = 18.dp, top = 12.dp, bottom = 12.dp, end = 6.dp),
+        Modifier
+            .fillMaxWidth()
+            .background(
+                if (highlighted) MaterialTheme.colorScheme.primaryContainer
+                else Color.Transparent,
+            )
+            .clickable(onClick = onOpen)
+            .padding(start = 18.dp, top = 12.dp, bottom = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Surface(
@@ -402,17 +576,148 @@ private fun FileRow(file: CloudFile, onOpen: () -> Unit, onShare: () -> Unit, on
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Row {
-            IconButton(onClick = onShare, modifier = Modifier.size(42.dp)) {
-                Icon(Icons.Outlined.Share, "Share ${file.name}")
+        Box {
+            IconButton(onClick = { optionsOpen = true }, modifier = Modifier.size(42.dp)) {
+                Icon(Icons.Outlined.MoreVert, "Options for ${file.name}")
             }
-            if (onDownload != null) {
-                IconButton(onClick = onDownload, modifier = Modifier.size(42.dp)) {
-                    Icon(Icons.Outlined.Download, "Download ${file.name}")
-                }
+            DropdownMenu(expanded = optionsOpen, onDismissRequest = { optionsOpen = false }) {
+                FileMenuItem("Delete", Icons.Outlined.Delete) { optionsOpen = false; onDelete() }
+                FileMenuItem("Copy", Icons.Outlined.ContentCopy) { optionsOpen = false; onCopy() }
+                FileMenuItem("Move", Icons.AutoMirrored.Outlined.DriveFileMove) { optionsOpen = false; onMove() }
+                FileMenuItem("Rename", Icons.Outlined.Edit) { optionsOpen = false; onRename() }
+                FileMenuItem("Share", Icons.Outlined.Share) { optionsOpen = false; onShare() }
+                FileMenuItem("Download", Icons.Outlined.Download) { optionsOpen = false; onDownload() }
             }
         }
     }
+}
+
+@Composable
+private fun FileMenuItem(label: String, icon: ImageVector, onClick: () -> Unit) {
+    DropdownMenuItem(text = { Text(label) }, leadingIcon = { Icon(icon, null) }, onClick = onClick)
+}
+
+@Composable
+private fun DeleteDialog(file: CloudFile, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
+        title = { Text("Move ${file.name} to deleted files?") },
+        text = {
+            Text(
+                if (file.isFolder) "The folder and everything inside it will be moved to Nextcloud’s deleted files."
+                else "The file will be moved to Nextcloud’s deleted files.",
+            )
+        },
+        confirmButton = { Button(onClick = onConfirm) { Text("Delete") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun RenameDialog(file: CloudFile, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var name by remember(file.path) { mutableStateOf(file.name) }
+    val valid = name.isNotBlank() && '/' !in name && name != file.name
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.Edit, null) },
+        title = { Text("Rename") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name") },
+                supportingText = { if ('/' in name) Text("A name cannot contain /") },
+                isError = '/' in name,
+                singleLine = true,
+            )
+        },
+        confirmButton = { Button(onClick = { onConfirm(name.trim()) }, enabled = valid) { Text("Rename") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun UploadSourceDialog(onDismiss: () -> Unit, onFiles: () -> Unit, onFolder: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.Upload, null) },
+        title = { Text("Upload") },
+        text = {
+            Column {
+                Button(onClick = onFiles, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.AutoMirrored.Outlined.InsertDriveFile, null)
+                    Text("Select files", Modifier.padding(start = 8.dp))
+                }
+                OutlinedButton(onClick = onFolder, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    Icon(Icons.Outlined.Folder, null)
+                    Text("Select a folder", Modifier.padding(start = 8.dp))
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun UploadQueueDialog(
+    items: List<UploadQueueItem>,
+    onDismiss: () -> Unit,
+    onClearFinished: () -> Unit,
+    onOpenItem: (UploadQueueItem) -> Unit,
+) {
+    val hasFinished = items.any { it.status in setOf(UploadStatus.COMPLETED, UploadStatus.FAILED) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.Upload, null) },
+        title = { Text("Upload queue") },
+        text = {
+            if (items.isEmpty()) {
+                Text("The upload queue is empty.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
+                    items(items, key = { it.id }) { item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenItem(item) }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                if (item.isFolder) Icons.Outlined.Folder else Icons.AutoMirrored.Outlined.InsertDriveFile,
+                                null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    when (item.status) {
+                                        UploadStatus.QUEUED -> "Queued"
+                                        UploadStatus.UPLOADING -> "Uploading…"
+                                        UploadStatus.COMPLETED -> "Completed"
+                                        UploadStatus.FAILED -> item.error ?: "Failed"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (item.status == UploadStatus.FAILED) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (item.status == UploadStatus.UPLOADING) {
+                                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                            } else if (item.status == UploadStatus.COMPLETED) {
+                                Icon(Icons.Outlined.Check, "Completed")
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        dismissButton = {
+            if (hasFinished) TextButton(onClick = onClearFinished) { Text("Clear finished") }
+        },
+    )
 }
 
 @Composable

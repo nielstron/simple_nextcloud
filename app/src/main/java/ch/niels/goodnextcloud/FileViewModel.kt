@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import ch.niels.goodnextcloud.data.Account
@@ -40,6 +41,21 @@ data class FileUiState(
     val previewError: String? = null,
     val downloadedUri: Uri? = null,
     val downloadedMimeType: String? = null,
+    val clipboardFile: CloudFile? = null,
+    val clipboardMode: ClipboardMode? = null,
+    val uploadQueue: List<UploadQueueItem> = emptyList(),
+    val highlightedPath: String? = null,
+)
+
+enum class ClipboardMode { COPY, MOVE }
+enum class UploadStatus { QUEUED, UPLOADING, COMPLETED, FAILED }
+data class UploadQueueItem(
+    val id: Long,
+    val name: String,
+    val targetPath: String,
+    val isFolder: Boolean,
+    val status: UploadStatus = UploadStatus.QUEUED,
+    val error: String? = null,
 )
 
 class FileViewModel(application: Application) : AndroidViewModel(application) {
@@ -51,6 +67,9 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var prefetchTarget: String? = null
     private var shareUserSearchJob: Job? = null
     private var previewJob: Job? = null
+    private var uploadWorkerJob: Job? = null
+    private var nextUploadId = 1L
+    private val uploadJobs = ArrayDeque<UploadJob>()
     private val _state = MutableStateFlow(FileUiState(account = store.load()))
     val state = _state.asStateFlow()
 
@@ -85,15 +104,21 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() {
         navigationJob?.cancel()
         prefetchJob?.cancel()
+        uploadWorkerJob?.cancel()
+        uploadJobs.clear()
         prefetchTarget = null
         folderCache.clear()
         store.clear()
         _state.value = FileUiState()
     }
 
-    fun open(folder: CloudFile) = loadPath(folder.path)
+    fun open(folder: CloudFile) {
+        clearHighlight()
+        loadPath(folder.path)
+    }
 
     fun up() {
+        clearHighlight()
         val parent = _state.value.path.substringBeforeLast('/', "")
         loadPath(parent)
     }
@@ -153,36 +178,58 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refresh() = loadPath(_state.value.path, forceRefresh = true)
 
-    fun upload(resolver: ContentResolver, uri: Uri) {
-        val account = _state.value.account ?: return
-        val details = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
-            ?.use { cursor ->
-                check(cursor.moveToFirst())
-                cursor.getString(0) to cursor.getLong(1)
-            } ?: error("The selected document has no metadata")
-        val target = NextcloudPath.child(_state.value.path, details.first)
-        if (_state.value.files.any { it.name == details.first }) {
-            _state.update { it.copy(error = "${details.first} already exists; it was not overwritten") }
-            return
-        }
-        _state.update { it.copy(loading = true, error = null) }
-        val uploadPath = _state.value.path
+    fun enqueueFiles(resolver: ContentResolver, uris: List<Uri>) {
+        val targetFolder = _state.value.path
         viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    client.upload(account, target, resolver, uri, details.second, resolver.getType(uri))
-                    client.list(account, uploadPath)
+            val sources = withContext(Dispatchers.IO) {
+                uris.map { uri ->
+                    val details = resolver.query(
+                        uri,
+                        arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                        null,
+                        null,
+                        null,
+                    )?.use { cursor ->
+                        check(cursor.moveToFirst())
+                        cursor.getString(0) to cursor.getLong(1)
+                    } ?: error("The selected document has no metadata")
+                    details.first to UploadSource.File(uri, details.second, resolver.getType(uri))
                 }
-            }.onSuccess { files ->
-                val sorted = files.sortedFiles()
-                folderCache.put(uploadPath, sorted)
-                if (_state.value.path == uploadPath) {
-                    _state.update { it.copy(files = sorted, loading = false, message = "${details.first} uploaded") }
-                    schedulePrefetch(account, sorted)
-                }
-            }.onFailure { failure -> _state.update { it.copy(loading = false, error = failure.userMessage()) } }
+            }
+            val jobs = sources.map { (name, source) ->
+                UploadJob(UploadQueueItem(nextUploadId++, name, targetFolder, false), source)
+            }
+            addUploadJobs(jobs)
         }
     }
+
+    fun enqueueFolder(resolver: ContentResolver, treeUri: Uri) {
+        val targetFolder = _state.value.path
+        val folder = requireNotNull(DocumentFile.fromTreeUri(getApplication(), treeUri))
+        val name = requireNotNull(folder.name) { "The selected folder has no name" }
+        addUploadJobs(
+            listOf(
+                UploadJob(
+                    item = UploadQueueItem(nextUploadId++, name, targetFolder, true),
+                    source = UploadSource.Folder(treeUri),
+                ),
+            ),
+        )
+    }
+
+    fun clearFinishedUploads() {
+        _state.update {
+            it.copy(uploadQueue = it.uploadQueue.filter { item -> item.status in setOf(UploadStatus.QUEUED, UploadStatus.UPLOADING) })
+        }
+    }
+
+    fun navigateToUpload(item: UploadQueueItem) {
+        val highlightedPath = NextcloudPath.child(item.targetPath, item.name)
+        loadPath(item.targetPath)
+        _state.update { it.copy(highlightedPath = highlightedPath) }
+    }
+
+    fun clearHighlight() = _state.update { it.copy(highlightedPath = null) }
 
     fun download(resolver: ContentResolver, file: CloudFile, uri: Uri) {
         val account = _state.value.account ?: return
@@ -195,7 +242,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                             loading = false,
                             message = "${file.name} downloaded",
                             downloadedUri = uri,
-                            downloadedMimeType = file.mimeType,
+                            downloadedMimeType = if (file.isFolder) "application/zip" else file.mimeType,
                         )
                     }
                 }
@@ -296,6 +343,39 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun delete(file: CloudFile) = mutateAndRefresh("${file.name} deleted") { account ->
+        client.delete(account, file)
+    }
+
+    fun rename(file: CloudFile, newName: String) = mutateAndRefresh("Renamed to $newName") { account ->
+        client.rename(account, file, newName)
+    }
+
+    fun stageTransfer(file: CloudFile, mode: ClipboardMode) {
+        _state.update {
+            it.copy(
+                clipboardFile = file,
+                clipboardMode = mode,
+                message = "${file.name} ready to ${mode.name.lowercase()}",
+            )
+        }
+    }
+
+    fun clearClipboard() = _state.update { it.copy(clipboardFile = null, clipboardMode = null) }
+
+    fun paste() {
+        val file = _state.value.clipboardFile ?: return
+        val mode = _state.value.clipboardMode ?: return
+        val destination = _state.value.path
+        mutateAndRefresh(
+            message = if (mode == ClipboardMode.COPY) "${file.name} copied" else "${file.name} moved",
+            onSuccess = ::clearClipboard,
+        ) { account ->
+            if (mode == ClipboardMode.COPY) client.copy(account, file, destination)
+            else client.move(account, file, destination)
+        }
+    }
+
     fun clearNotice() = _state.update {
         it.copy(
             error = null,
@@ -304,6 +384,107 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             downloadedUri = null,
             downloadedMimeType = null,
         )
+    }
+
+    private fun mutateAndRefresh(
+        message: String,
+        onSuccess: () -> Unit = {},
+        mutation: (Account) -> Unit,
+    ) {
+        val account = _state.value.account ?: return
+        val currentPath = _state.value.path
+        _state.update { it.copy(loading = true, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    mutation(account)
+                    client.list(account, currentPath)
+                }
+            }.onSuccess { files ->
+                val sorted = files.sortedFiles()
+                folderCache.clear()
+                folderCache.put(currentPath, sorted)
+                _state.update {
+                    it.copy(
+                        files = if (it.path == currentPath) sorted else it.files,
+                        loading = false,
+                        message = message,
+                    )
+                }
+                onSuccess()
+                schedulePrefetch(account, sorted)
+            }.onFailure { failure ->
+                _state.update { it.copy(loading = false, error = failure.userMessage()) }
+            }
+        }
+    }
+
+    private fun addUploadJobs(jobs: List<UploadJob>) {
+        uploadJobs.addAll(jobs)
+        _state.update { it.copy(uploadQueue = it.uploadQueue + jobs.map(UploadJob::item)) }
+        startUploadWorker()
+    }
+
+    private fun startUploadWorker() {
+        if (uploadWorkerJob?.isActive == true) return
+        val account = _state.value.account ?: return
+        uploadWorkerJob = viewModelScope.launch {
+            while (uploadJobs.isNotEmpty()) {
+                val job = uploadJobs.removeFirst()
+                updateUpload(job.item.id, UploadStatus.UPLOADING)
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        when (val source = job.source) {
+                            is UploadSource.File -> client.upload(
+                                account,
+                                NextcloudPath.child(job.item.targetPath, job.item.name),
+                                getApplication<Application>().contentResolver,
+                                source.uri,
+                                source.size,
+                                source.mimeType,
+                            )
+                            is UploadSource.Folder -> uploadFolder(
+                                account,
+                                getApplication<Application>().contentResolver,
+                                requireNotNull(DocumentFile.fromTreeUri(getApplication(), source.uri)),
+                                NextcloudPath.child(job.item.targetPath, job.item.name),
+                            )
+                        }
+                    }
+                }.onSuccess {
+                    updateUpload(job.item.id, UploadStatus.COMPLETED)
+                    folderCache.remove(job.item.targetPath)
+                    if (_state.value.path == job.item.targetPath) refresh()
+                }.onFailure { failure ->
+                    updateUpload(job.item.id, UploadStatus.FAILED, failure.userMessage())
+                }
+            }
+        }
+    }
+
+    private fun uploadFolder(
+        account: Account,
+        resolver: ContentResolver,
+        folder: DocumentFile,
+        targetPath: String,
+    ) {
+        client.createFolder(account, targetPath)
+        folder.listFiles().forEach { child ->
+            val name = requireNotNull(child.name) { "An upload item has no name" }
+            val childTarget = NextcloudPath.child(targetPath, name)
+            if (child.isDirectory) uploadFolder(account, resolver, child, childTarget)
+            else client.upload(account, childTarget, resolver, child.uri, child.length(), child.type)
+        }
+    }
+
+    private fun updateUpload(id: Long, status: UploadStatus, error: String? = null) {
+        _state.update {
+            it.copy(
+                uploadQueue = it.uploadQueue.map { item ->
+                    if (item.id == id) item.copy(status = status, error = error) else item
+                },
+            )
+        }
     }
 
     /**
@@ -349,3 +530,9 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
 private fun List<CloudFile>.sortedFiles() = sortedWith(compareByDescending<CloudFile> { it.isFolder }.thenBy { it.name.lowercase() })
 private fun Throwable.userMessage() = message ?: "Something went wrong"
+
+private data class UploadJob(val item: UploadQueueItem, val source: UploadSource)
+private sealed interface UploadSource {
+    data class File(val uri: Uri, val size: Long, val mimeType: String?) : UploadSource
+    data class Folder(val uri: Uri) : UploadSource
+}

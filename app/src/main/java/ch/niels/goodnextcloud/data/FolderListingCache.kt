@@ -36,6 +36,11 @@ class FolderListingCache(
     fun paths(): Set<String> = entries.keys.toSet()
 
     @Synchronized
+    fun remove(path: String) {
+        entries.remove(normalize(path))
+    }
+
+    @Synchronized
     fun recordVisit(path: String) {
         val visit = visits.getOrPut(normalize(path)) { Visit() }
         visit.count += 1
