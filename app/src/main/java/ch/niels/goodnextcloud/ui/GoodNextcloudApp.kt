@@ -334,6 +334,26 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
         }
     }
 
+    state.previewFile?.let { file ->
+        FullScreenImagePreview(
+            files = state.files.filter { it.mimeType?.startsWith("image/") == true },
+            currentFile = file,
+            bytes = state.previewBytes,
+            loading = state.previewLoading,
+            error = state.previewError,
+            onSelect = model::showPreview,
+            onDismiss = model::closePreview,
+            onShare = { sharing = file },
+            onDownload = {
+                model.closePreview()
+                pendingDownload = file
+                downloadLauncher.launch(file.name)
+            },
+        )
+    }
+
+    // Compose the share dialog after the viewer so it sits above it. The viewer remains mounted,
+    // preserving the current image and pager position while sharing is completed or cancelled.
     sharing?.let { file ->
         ShareDialog(
             file = file,
@@ -354,27 +374,6 @@ private fun FilesScreen(state: FileUiState, model: FileViewModel) {
                 sharing = null
                 model.clearShareUsers()
                 model.createLink(file, options)
-            },
-        )
-    }
-
-    state.previewFile?.let { file ->
-        FullScreenImagePreview(
-            files = state.files.filter { it.mimeType?.startsWith("image/") == true },
-            currentFile = file,
-            bytes = state.previewBytes,
-            loading = state.previewLoading,
-            error = state.previewError,
-            onSelect = model::showPreview,
-            onDismiss = model::closePreview,
-            onShare = {
-                model.closePreview()
-                sharing = file
-            },
-            onDownload = {
-                model.closePreview()
-                pendingDownload = file
-                downloadLauncher.launch(file.name)
             },
         )
     }
