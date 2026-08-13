@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -43,10 +44,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
 import androidx.compose.material.icons.automirrored.outlined.Logout
+import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
@@ -71,6 +75,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -120,9 +125,11 @@ import ch.niels.goodnextcloud.ClipboardMode
 import ch.niels.goodnextcloud.UploadQueueItem
 import ch.niels.goodnextcloud.UploadStatus
 import ch.niels.goodnextcloud.data.CloudFile
+import ch.niels.goodnextcloud.data.ExistingShare
 import ch.niels.goodnextcloud.data.LinkShareOptions
 import ch.niels.goodnextcloud.data.NextcloudPath
 import ch.niels.goodnextcloud.data.ShareUser
+import ch.niels.goodnextcloud.data.ShareUpdate
 import java.time.LocalDate
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -236,6 +243,34 @@ private fun LoginScreen(
     }
 }
 
+private enum class FileSort(val label: String, val comparator: Comparator<CloudFile>) {
+    NAME(
+        "Name",
+        compareBy<CloudFile> { !it.isFolder }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+    ),
+    MODIFIED(
+        "Last modified",
+        compareBy<CloudFile> { !it.isFolder }
+            .thenByDescending { it.modifiedAt?.let(::modifiedEpochSeconds) ?: Long.MIN_VALUE }
+            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+    ),
+    SIZE(
+        "Size",
+        compareBy<CloudFile> { !it.isFolder }
+            .thenByDescending(CloudFile::size)
+            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+    ),
+    TYPE(
+        "Type",
+        compareBy<CloudFile> { !it.isFolder }
+            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.mimeType ?: it.name.substringAfterLast('.', "") }
+            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+    ),
+}
+
+private fun modifiedEpochSeconds(value: String): Long =
+    ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toEpochSecond()
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FilesScreen(
@@ -254,6 +289,11 @@ private fun FilesScreen(
     var clipboardMenuOpen by remember { mutableStateOf(false) }
     var uploadSourceOpen by remember { mutableStateOf(false) }
     var uploadQueueOpen by remember { mutableStateOf(false) }
+    var newFolderOpen by remember { mutableStateOf(false) }
+    var actionsExpanded by remember { mutableStateOf(false) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    var showHiddenFiles by remember { mutableStateOf(false) }
+    var fileSort by remember { mutableStateOf(FileSort.NAME) }
     val fileListState = rememberLazyListState()
     val snackbar = remember { SnackbarHostState() }
     val unfinishedUploadCount = state.uploadQueue.count {
@@ -354,6 +394,18 @@ private fun FilesScreen(
                 },
                 actions = {
                     IconButton(onClick = model::refresh) { Icon(Icons.Outlined.Refresh, "Refresh") }
+                    Box {
+                        IconButton(onClick = { sortMenuOpen = true }) { Icon(Icons.AutoMirrored.Outlined.Sort, "Sort files") }
+                        DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                            FileSort.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label) },
+                                    trailingIcon = { if (fileSort == option) Icon(Icons.Outlined.Check, "Selected") },
+                                    onClick = { fileSort = option; sortMenuOpen = false },
+                                )
+                            }
+                        }
+                    }
                     state.clipboardFile?.let { clipboardFile ->
                         val sourceParent = clipboardFile.path.substringBeforeLast('/', "")
                         val insideSource = clipboardFile.isFolder &&
@@ -415,6 +467,13 @@ private fun FilesScreen(
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
+                                text = { Text("Show hidden files") },
+                                trailingIcon = {
+                                    Checkbox(checked = showHiddenFiles, onCheckedChange = null)
+                                },
+                                onClick = { showHiddenFiles = !showHiddenFiles },
+                            )
+                            DropdownMenuItem(
                                 text = {
                                     Text(
                                         if (unfinishedUploadCount > 0) "Upload queue ($unfinishedUploadCount active)"
@@ -436,24 +495,36 @@ private fun FilesScreen(
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = {
-                    if (sharedUris.isNotEmpty()) {
+            if (sharedUris.isNotEmpty()) {
+                ExtendedFloatingActionButton(
+                    onClick = {
                         model.enqueueFiles(resolver, sharedUris)
                         onSharedUrisConsumed()
-                    } else {
-                        uploadSourceOpen = true
+                    },
+                    icon = { Icon(Icons.Outlined.ContentPaste, null) },
+                    text = {
+                        Text(if (sharedUris.size == 1) "Place file here" else "Place ${sharedUris.size} files here")
+                    },
+                )
+            } else {
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (actionsExpanded) {
+                        ExtendedFloatingActionButton(
+                            onClick = { actionsExpanded = false; newFolderOpen = true },
+                            icon = { Icon(Icons.Outlined.CreateNewFolder, null) },
+                            text = { Text("New folder") },
+                        )
+                        ExtendedFloatingActionButton(
+                            onClick = { actionsExpanded = false; uploadSourceOpen = true },
+                            icon = { Icon(Icons.Outlined.Upload, null) },
+                            text = { Text("Upload") },
+                        )
                     }
-                },
-                icon = { Icon(if (sharedUris.isNotEmpty()) Icons.Outlined.ContentPaste else Icons.Outlined.Upload, null) },
-                text = {
-                    Text(
-                        if (sharedUris.isEmpty()) "Upload"
-                        else if (sharedUris.size == 1) "Place file here"
-                        else "Place ${sharedUris.size} files here",
-                    )
-                },
-            )
+                    FloatingActionButton(onClick = { actionsExpanded = !actionsExpanded }) {
+                        Icon(if (actionsExpanded) Icons.Outlined.Close else Icons.Outlined.Add, if (actionsExpanded) "Close actions" else "Add")
+                    }
+                }
+            }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -467,7 +538,12 @@ private fun FilesScreen(
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
             )
-            val visibleFiles = state.files.filter { it.name.contains(search, ignoreCase = true) }
+            val visibleFiles = state.files
+                .asSequence()
+                .filter { showHiddenFiles || !it.name.startsWith('.') }
+                .filter { it.name.contains(search, ignoreCase = true) }
+                .sortedWith(fileSort.comparator)
+                .toList()
             LaunchedEffect(state.highlightedPath) {
                 if (state.highlightedPath != null) search = ""
             }
@@ -482,7 +558,10 @@ private fun FilesScreen(
             if (!state.loading && visibleFiles.isEmpty() && state.path.isEmpty()) {
                 EmptyFolder(if (search.isBlank()) "This folder is empty" else "No matching files")
             } else {
-                LazyColumn(state = fileListState, contentPadding = PaddingValues(bottom = 96.dp)) {
+                LazyColumn(
+                    state = fileListState,
+                    contentPadding = PaddingValues(bottom = if (actionsExpanded) 224.dp else 96.dp),
+                ) {
                     if (state.path.isNotEmpty()) {
                         item(key = "parent-folder") {
                             ParentFolderRow(onOpen = model::up)
@@ -542,23 +621,30 @@ private fun FilesScreen(
         ShareDialog(
             file = file,
             users = state.shareUsers,
+            frequentUsers = state.frequentShareUsers,
             usersLoading = state.shareUsersLoading,
             usersError = state.shareUsersError,
+            shares = state.shares,
+            sharesLoading = state.sharesLoading,
+            sharesError = state.sharesError,
+            operationLoading = state.shareOperationLoading,
+            operationError = state.shareOperationError,
+            currentUsername = requireNotNull(state.account).username,
             onDismiss = {
                 sharing = null
-                model.clearShareUsers()
+                model.clearShareState()
             },
+            onLoadShares = { model.loadShares(file) },
+            onLoadFrequentUsers = model::loadFrequentShareUsers,
             onSearchUsers = { query -> model.searchShareUsers(query, file.isFolder) },
-            onShareWithUser = { recipient ->
-                sharing = null
-                model.clearShareUsers()
-                model.share(file, recipient)
+            onShareWithUser = { user, permissions ->
+                model.share(file, user, permissions)
             },
             onCreateLink = { options ->
-                sharing = null
-                model.clearShareUsers()
                 model.createLink(file, options)
             },
+            onUpdateShare = { share, update -> model.updateShare(file, share, update) },
+            onDeleteShare = { share -> model.deleteShare(file, share) },
         )
     }
 
@@ -594,6 +680,16 @@ private fun FilesScreen(
             onFolder = {
                 uploadSourceOpen = false
                 folderUploadLauncher.launch(null)
+            },
+        )
+    }
+
+    if (newFolderOpen) {
+        NewFolderDialog(
+            onDismiss = { newFolderOpen = false },
+            onConfirm = { name ->
+                newFolderOpen = false
+                model.createFolder(name)
             },
         )
     }
@@ -734,6 +830,29 @@ private fun RenameDialog(file: CloudFile, onDismiss: () -> Unit, onConfirm: (Str
             )
         },
         confirmButton = { Button(onClick = { onConfirm(name.trim()) }, enabled = valid) { Text("Rename") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun NewFolderDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    val valid = name.isNotBlank() && '/' !in name
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.CreateNewFolder, null) },
+        title = { Text("New folder") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Folder name") },
+                supportingText = { if ('/' in name) Text("A name cannot contain /") },
+                isError = '/' in name,
+                singleLine = true,
+            )
+        },
+        confirmButton = { Button(onClick = { onConfirm(name.trim()) }, enabled = valid) { Text("Create") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
@@ -984,31 +1103,102 @@ private fun ZoomablePreviewImage(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ShareDialog(
     file: CloudFile,
     users: List<ShareUser>,
+    frequentUsers: List<ShareUser>,
     usersLoading: Boolean,
     usersError: String?,
+    shares: List<ExistingShare>,
+    sharesLoading: Boolean,
+    sharesError: String?,
+    operationLoading: Boolean,
+    operationError: String?,
+    currentUsername: String,
     onDismiss: () -> Unit,
+    onLoadShares: () -> Unit,
+    onLoadFrequentUsers: () -> Unit,
     onSearchUsers: (String) -> Unit,
-    onShareWithUser: (String) -> Unit,
+    onShareWithUser: (ShareUser, Int) -> Unit,
     onCreateLink: (LinkShareOptions) -> Unit,
+    onUpdateShare: (ExistingShare, ShareUpdate) -> Unit,
+    onDeleteShare: (ExistingShare) -> Unit,
 ) {
     var userQuery by remember { mutableStateOf("") }
     var selectedUser by remember { mutableStateOf<ShareUser?>(null) }
     var password by remember { mutableStateOf("") }
     var expiry by remember { mutableStateOf("") }
-    var allowUpload by remember { mutableStateOf(false) }
+    var userPermissions by remember(file.path) { mutableStateOf(defaultSharePermissions(file.isFolder, false)) }
+    var linkPermissions by remember(file.path) { mutableStateOf(defaultSharePermissions(file.isFolder, true)) }
     var showLinkOptions by remember { mutableStateOf(false) }
     val validExpiry = expiry.isBlank() || runCatching { LocalDate.parse(expiry) >= LocalDate.now() }.getOrDefault(false)
-    LaunchedEffect(file.path) { onSearchUsers("") }
-    AlertDialog(
+    val alreadySharedUserIds = shares.filter { it.shareType == 0 }.mapNotNull(ExistingShare::shareWith).toSet()
+    val candidates = (if (userQuery.isBlank()) frequentUsers else users)
+        .filterNot { it.id in alreadySharedUserIds }
+    val availableUsers = if (userQuery.isBlank()) candidates.take(3) else candidates
+    val effectiveSelection = selectedUser?.takeUnless { it.id in alreadySharedUserIds }
+    val displayedUsers = effectiveSelection?.let(::listOf) ?: availableUsers
+    LaunchedEffect(file.path) {
+        onLoadShares()
+        onLoadFrequentUsers()
+    }
+    Dialog(
         onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Outlined.Share, null) },
-        title = { Text("Share ${file.name}") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+                TopAppBar(
+                    title = { Text("Share ${file.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    navigationIcon = {
+                        IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, "Close sharing") }
+                    },
+                )
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                ) {
+                if (operationLoading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(bottom = 10.dp))
+                if (operationError != null) {
+                    Text(
+                        operationError,
+                        modifier = Modifier.padding(bottom = 10.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Text("Existing shares", fontWeight = FontWeight.SemiBold)
+                when {
+                    sharesLoading -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+                    sharesError != null -> Text(
+                        sharesError,
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    shares.isEmpty() -> Text(
+                        "Only you can currently access this ${if (file.isFolder) "folder" else "file"}.",
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    else -> shares.forEach { share ->
+                        ExistingShareEditor(
+                            share = share,
+                            isFolder = file.isFolder,
+                            editable = share.ownerId == null || share.ownerId == currentUsername,
+                            operationLoading = operationLoading,
+                            onUpdate = { onUpdateShare(share, it) },
+                            onDelete = { onDeleteShare(share) },
+                        )
+                    }
+                }
+
+                HorizontalDivider(Modifier.padding(vertical = 20.dp))
                 Text("Share with a Nextcloud user", fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(
                     value = userQuery,
@@ -1022,25 +1212,32 @@ private fun ShareDialog(
                     leadingIcon = { Icon(Icons.Outlined.Search, null) },
                     singleLine = true,
                 )
-                if (usersLoading) {
+                if (userQuery.isNotBlank() && usersLoading) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
-                } else if (usersError != null) {
+                } else if (userQuery.isNotBlank() && usersError != null) {
                     Text(
                         usersError,
                         modifier = Modifier.padding(top = 8.dp),
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
-                } else if (users.isEmpty()) {
+                } else if (displayedUsers.isEmpty()) {
                     Text(
-                        if (userQuery.isBlank()) "No suggested users" else "No users found",
+                        if (userQuery.isBlank()) "Type a name to find a user" else "No users found",
                         modifier = Modifier.padding(vertical = 12.dp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                     )
                 } else {
                     Column(Modifier.padding(top = 6.dp)) {
-                        users.take(5).forEach { user ->
+                        if (userQuery.isBlank() && selectedUser == null) {
+                            Text(
+                                "Frequently shared with",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        displayedUsers.take(if (userQuery.isBlank()) 3 else 5).forEach { user ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1063,9 +1260,16 @@ private fun ShareDialog(
                         }
                     }
                 }
+                Text("Permissions", modifier = Modifier.padding(top = 8.dp), fontWeight = FontWeight.Medium)
+                SharePermissionControls(
+                    permissions = userPermissions,
+                    isFolder = file.isFolder,
+                    isLink = false,
+                    onChange = { userPermissions = it },
+                )
                 Button(
-                    onClick = { onShareWithUser(requireNotNull(selectedUser).id) },
-                    enabled = selectedUser != null,
+                    onClick = { onShareWithUser(requireNotNull(effectiveSelection), userPermissions or 1) },
+                    enabled = effectiveSelection != null && !operationLoading,
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 ) { Text("Share with user") }
 
@@ -1101,26 +1305,184 @@ private fun ShareDialog(
                             isError = !validExpiry,
                             singleLine = true,
                         )
-                        if (file.isFolder) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(checked = allowUpload, onCheckedChange = { allowUpload = it })
-                                Text("Allow recipients to upload")
-                            }
-                        }
+                        Text("Permissions", modifier = Modifier.padding(top = 8.dp), fontWeight = FontWeight.Medium)
+                        SharePermissionControls(
+                            permissions = linkPermissions,
+                            isFolder = file.isFolder,
+                            isLink = true,
+                            onChange = { linkPermissions = it },
+                        )
                     }
                 }
                 OutlinedButton(
-                    onClick = { onCreateLink(LinkShareOptions(password, expiry, allowUpload)) },
-                    enabled = validExpiry,
+                    onClick = {
+                        onCreateLink(
+                            LinkShareOptions(
+                                password = password,
+                                expireDate = expiry,
+                                permissions = linkPermissions or 1,
+                            ),
+                        )
+                    },
+                    enabled = validExpiry && !operationLoading,
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 ) {
                     Text("Create and copy link")
                 }
+                }
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
-    )
+        }
+    }
 }
+
+@Composable
+private fun ExistingShareEditor(
+    share: ExistingShare,
+    isFolder: Boolean,
+    editable: Boolean,
+    operationLoading: Boolean,
+    onUpdate: (ShareUpdate) -> Unit,
+    onDelete: () -> Unit,
+) {
+    val context = LocalContext.current
+    var permissions by remember(share.id, share.permissions) { mutableStateOf(share.permissions) }
+    var expiry by remember(share.id, share.expireDate) { mutableStateOf(share.expireDate.orEmpty()) }
+    var newPassword by remember(share.id) { mutableStateOf("") }
+    var removePassword by remember(share.id) { mutableStateOf(false) }
+    var confirmRemove by remember(share.id) { mutableStateOf(false) }
+    val isLink = share.shareType == 3
+    val validExpiry = expiry.isBlank() || runCatching { LocalDate.parse(expiry) >= LocalDate.now() }.getOrDefault(false)
+    val title = when (share.shareType) {
+        0 -> share.displayName ?: share.shareWith ?: "User"
+        1 -> share.displayName ?: share.shareWith ?: "Group"
+        3 -> "Public link"
+        4 -> share.displayName ?: share.shareWith ?: "Email share"
+        6 -> share.displayName ?: share.shareWith ?: "Federated share"
+        7 -> share.displayName ?: share.shareWith ?: "Circle"
+        10 -> share.displayName ?: share.shareWith ?: "Conversation"
+        else -> share.displayName ?: share.shareWith ?: "Share"
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (isLink) Icons.Outlined.Share else Icons.Outlined.Person, null)
+                Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                    Text(title, fontWeight = FontWeight.Medium)
+                    if (!editable) {
+                        Text(
+                            "Shared by ${share.ownerId}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (isLink && share.url != null) {
+                    IconButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Nextcloud share link", share.url))
+                        },
+                    ) { Icon(Icons.Outlined.ContentCopy, "Copy link") }
+                }
+            }
+            if (editable) {
+                SharePermissionControls(
+                    permissions = permissions,
+                    isFolder = isFolder,
+                    isLink = isLink,
+                    onChange = { permissions = it },
+                )
+                if (isLink) {
+                    OutlinedTextField(
+                        value = expiry,
+                        onValueChange = { expiry = it.trim() },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                        label = { Text("Expiration date") },
+                        placeholder = { Text("YYYY-MM-DD") },
+                        supportingText = { if (!validExpiry) Text("Use today or a future date") },
+                        isError = !validExpiry,
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = newPassword,
+                        onValueChange = { newPassword = it; removePassword = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("New password") },
+                        supportingText = { Text("Leave blank to keep the current password") },
+                        enabled = !removePassword,
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = removePassword,
+                            onCheckedChange = { removePassword = it; if (it) newPassword = "" },
+                        )
+                        Text("Remove password")
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    if (confirmRemove) {
+                        TextButton(onClick = { confirmRemove = false }) { Text("Cancel") }
+                        TextButton(onClick = onDelete, enabled = !operationLoading) { Text("Confirm remove") }
+                    } else {
+                        TextButton(onClick = { confirmRemove = true }, enabled = !operationLoading) { Text("Remove") }
+                        TextButton(
+                            onClick = {
+                                onUpdate(
+                                    ShareUpdate(
+                                        permissions = permissions or 1,
+                                        expireDate = if (isLink && expiry != share.expireDate.orEmpty()) expiry else null,
+                                        password = if (isLink) {
+                                            if (removePassword) "" else newPassword.ifBlank { null }
+                                        } else null,
+                                    ),
+                                )
+                            },
+                            enabled = validExpiry && !operationLoading,
+                        ) { Text("Save") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionCheckbox(label: String, bit: Int, permissions: Int, onChange: (Int) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(
+            checked = permissions and bit != 0,
+            onCheckedChange = { checked ->
+                onChange(if (checked) permissions or bit else permissions and bit.inv())
+            },
+        )
+        Text(label)
+    }
+}
+
+@Composable
+private fun SharePermissionControls(
+    permissions: Int,
+    isFolder: Boolean,
+    isLink: Boolean,
+    onChange: (Int) -> Unit,
+) {
+    PermissionCheckbox("Can edit", 2, permissions, onChange)
+    if (isFolder) {
+        PermissionCheckbox("Can upload/create", 4, permissions, onChange)
+        PermissionCheckbox("Can delete items", 8, permissions, onChange)
+    }
+    if (!isLink) PermissionCheckbox("Can reshare", 16, permissions, onChange)
+}
+
+private fun defaultSharePermissions(isFolder: Boolean, isLink: Boolean): Int =
+    if (isLink) 1 else 1 or 2 or (if (isFolder) 4 or 8 else 0) or 16
 
 @Composable
 private fun EmptyFolder(message: String) {

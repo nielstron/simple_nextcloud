@@ -12,11 +12,14 @@ import androidx.lifecycle.viewModelScope
 import ch.niels.goodnextcloud.data.Account
 import ch.niels.goodnextcloud.data.AccountStore
 import ch.niels.goodnextcloud.data.CloudFile
+import ch.niels.goodnextcloud.data.ExistingShare
 import ch.niels.goodnextcloud.data.FolderListingCache
 import ch.niels.goodnextcloud.data.LinkShareOptions
 import ch.niels.goodnextcloud.data.NextcloudClient
 import ch.niels.goodnextcloud.data.NextcloudPath
 import ch.niels.goodnextcloud.data.ShareUser
+import ch.niels.goodnextcloud.data.ShareHistoryStore
+import ch.niels.goodnextcloud.data.ShareUpdate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -38,6 +41,12 @@ data class FileUiState(
     val shareUsers: List<ShareUser> = emptyList(),
     val shareUsersLoading: Boolean = false,
     val shareUsersError: String? = null,
+    val frequentShareUsers: List<ShareUser> = emptyList(),
+    val shares: List<ExistingShare> = emptyList(),
+    val sharesLoading: Boolean = false,
+    val sharesError: String? = null,
+    val shareOperationLoading: Boolean = false,
+    val shareOperationError: String? = null,
     val previewFile: CloudFile? = null,
     val previewBytes: ByteArray? = null,
     val previewLoading: Boolean = false,
@@ -68,6 +77,7 @@ data class UploadQueueItem(
 class FileViewModel(application: Application) : AndroidViewModel(application) {
     private val store = AccountStore(application)
     private val client = NextcloudClient()
+    private val shareHistory = ShareHistoryStore(application)
     private val folderCache = FolderListingCache()
     private var navigationJob: Job? = null
     private var prefetchJob: Job? = null
@@ -360,29 +370,33 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearLocalOpen() = _state.update { it.copy(localOpenUri = null, localOpenMimeType = null) }
 
-    fun share(file: CloudFile, shareWith: String?) {
-        _state.update { it.copy(loading = true, error = null) }
+    fun share(file: CloudFile, user: ShareUser, permissions: Int) {
+        _state.update { it.copy(shareOperationLoading = true, shareOperationError = null) }
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    client.share(requireNotNull(_state.value.account), file.path, shareWith)
+                    client.share(requireNotNull(_state.value.account), file.path, user.id, permissions)
                 }
             }.onSuccess { result ->
                 _state.update {
                     it.copy(
-                        loading = false,
-                        message = if (shareWith.isNullOrBlank()) "Public link copied" else "Shared with ${shareWith.trim()}",
+                        shareOperationLoading = false,
+                        message = "Shared with ${user.displayName}",
                         shareUrl = result.url,
                     )
                 }
+                val account = requireNotNull(_state.value.account)
+                shareHistory.record(account, user)
+                loadFrequentShareUsers()
+                loadShares(file)
             }.onFailure { failure ->
-                _state.update { it.copy(loading = false, error = failure.userMessage()) }
+                _state.update { it.copy(shareOperationLoading = false, shareOperationError = failure.userMessage()) }
             }
         }
     }
 
     fun createLink(file: CloudFile, options: LinkShareOptions) {
-        _state.update { it.copy(loading = true, error = null) }
+        _state.update { it.copy(shareOperationLoading = true, shareOperationError = null) }
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -390,17 +404,64 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }.onSuccess { result ->
                 _state.update {
-                    it.copy(loading = false, message = "Public link copied", shareUrl = result.url)
+                    it.copy(shareOperationLoading = false, message = "Public link copied", shareUrl = result.url)
                 }
+                loadShares(file)
             }.onFailure { failure ->
-                _state.update { it.copy(loading = false, error = failure.userMessage()) }
+                _state.update { it.copy(shareOperationLoading = false, shareOperationError = failure.userMessage()) }
             }
+        }
+    }
+
+    fun loadShares(file: CloudFile) {
+        val account = _state.value.account ?: return
+        _state.update { it.copy(sharesLoading = true, sharesError = null) }
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { client.listShares(account, file.path) } }
+                .onSuccess { shares -> _state.update { it.copy(shares = shares, sharesLoading = false) } }
+                .onFailure { failure ->
+                    _state.update { it.copy(shares = emptyList(), sharesLoading = false, sharesError = failure.userMessage()) }
+                }
+        }
+    }
+
+    fun updateShare(file: CloudFile, share: ExistingShare, update: ShareUpdate) {
+        val account = _state.value.account ?: return
+        _state.update { it.copy(shareOperationLoading = true, shareOperationError = null) }
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { client.updateShare(account, share.id, update) } }
+                .onSuccess {
+                    _state.update { it.copy(shareOperationLoading = false, message = "Share updated") }
+                    loadShares(file)
+                }
+                .onFailure { failure ->
+                    _state.update { it.copy(shareOperationLoading = false, shareOperationError = failure.userMessage()) }
+                }
+        }
+    }
+
+    fun deleteShare(file: CloudFile, share: ExistingShare) {
+        val account = _state.value.account ?: return
+        _state.update { it.copy(shareOperationLoading = true, shareOperationError = null) }
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { client.deleteShare(account, share.id) } }
+                .onSuccess {
+                    _state.update { it.copy(shareOperationLoading = false, message = "Share removed") }
+                    loadShares(file)
+                }
+                .onFailure { failure ->
+                    _state.update { it.copy(shareOperationLoading = false, shareOperationError = failure.userMessage()) }
+                }
         }
     }
 
     fun searchShareUsers(query: String, isFolder: Boolean) {
         val account = _state.value.account ?: return
         shareUserSearchJob?.cancel()
+        if (query.isBlank()) {
+            _state.update { it.copy(shareUsers = emptyList(), shareUsersLoading = false, shareUsersError = null) }
+            return
+        }
         _state.update { it.copy(shareUsersLoading = true, shareUsersError = null) }
         shareUserSearchJob = viewModelScope.launch {
             if (query.isNotBlank()) delay(USER_SEARCH_DEBOUNCE_MILLIS)
@@ -418,9 +479,28 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun loadFrequentShareUsers() {
+        val account = _state.value.account ?: return
+        _state.update { it.copy(frequentShareUsers = shareHistory.frequent(account)) }
+    }
+
     fun clearShareUsers() {
         shareUserSearchJob?.cancel()
         _state.update { it.copy(shareUsers = emptyList(), shareUsersLoading = false, shareUsersError = null) }
+    }
+
+    fun clearShareState() {
+        clearShareUsers()
+        _state.update {
+            it.copy(
+                shares = emptyList(),
+                sharesLoading = false,
+                sharesError = null,
+                shareOperationLoading = false,
+                shareOperationError = null,
+                frequentShareUsers = emptyList(),
+            )
+        }
     }
 
     fun showPreview(file: CloudFile) {
@@ -457,6 +537,13 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rename(file: CloudFile, newName: String) = mutateAndRefresh("Renamed to $newName") { account ->
         client.rename(account, file, newName)
+    }
+
+    fun createFolder(name: String) {
+        val trimmed = name.trim()
+        require(trimmed.isNotEmpty() && '/' !in trimmed) { "Enter a folder name without slashes" }
+        val target = NextcloudPath.child(_state.value.path, trimmed)
+        mutateAndRefresh("$trimmed created") { account -> client.createFolder(account, target) }
     }
 
     fun stageTransfer(file: CloudFile, mode: ClipboardMode) {

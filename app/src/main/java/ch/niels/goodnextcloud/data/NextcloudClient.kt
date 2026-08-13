@@ -193,10 +193,11 @@ class NextcloudClient(
         }
     }
 
-    fun share(account: Account, path: String, shareWith: String?): ShareResult {
+    fun share(account: Account, path: String, shareWith: String?, permissions: Int): ShareResult {
         val form = FormBody.Builder()
             .add("path", "/${path.trimStart('/')}")
             .add("shareType", if (shareWith.isNullOrBlank()) "3" else "0")
+            .add("permissions", permissions.toString())
             .apply { if (!shareWith.isNullOrBlank()) add("shareWith", shareWith.trim()) }
             .build()
         return createShare(account, form)
@@ -206,14 +207,54 @@ class NextcloudClient(
         val form = FormBody.Builder()
             .add("path", "/${path.trimStart('/')}")
             .add("shareType", "3")
-            .add("permissions", if (options.allowUpload) "15" else "1")
+            .add("permissions", options.permissions.toString())
             .apply {
                 if (options.password.isNotBlank()) add("password", options.password)
                 if (options.expireDate.isNotBlank()) add("expireDate", options.expireDate)
-                if (options.allowUpload) add("publicUpload", "true")
+                if (options.permissions and (2 or 4 or 8) != 0) add("publicUpload", "true")
             }
             .build()
         return createShare(account, form)
+    }
+
+    fun listShares(account: Account, path: String): List<ExistingShare> {
+        val url = shareApiUrl(account)
+            .toHttpUrl()
+            .newBuilder()
+            .addQueryParameter("path", "/${path.trimStart('/')}")
+            .addQueryParameter("reshares", "true")
+            .build()
+        val request = authenticated(account, url.toString())
+            .get()
+            .header("OCS-APIRequest", "true")
+            .header("Accept", "application/json")
+            .build()
+        val data = executeOcs(request).getJSONArray("data")
+        return buildList {
+            for (index in 0 until data.length()) add(data.getJSONObject(index).toExistingShare())
+        }
+    }
+
+    internal fun parseShares(json: String): List<ExistingShare> {
+        val data = JSONObject(json).getJSONObject("ocs").getJSONArray("data")
+        return buildList {
+            for (index in 0 until data.length()) add(data.getJSONObject(index).toExistingShare())
+        }
+    }
+
+    fun updateShare(account: Account, id: String, update: ShareUpdate) {
+        updateShareField(account, id, "permissions", update.permissions.toString())
+        update.expireDate?.let { updateShareField(account, id, "expireDate", it) }
+        update.password?.let { updateShareField(account, id, "password", it) }
+    }
+
+    fun deleteShare(account: Account, id: String) {
+        val request = authenticated(account, "${shareApiUrl(account)}/$id")
+            .delete()
+            .header("OCS-APIRequest", "true")
+            .header("Accept", "application/json")
+            .build()
+        executeOcs(request)
     }
 
     fun searchUsers(account: Account, query: String, itemType: String): List<ShareUser> {
@@ -258,26 +299,54 @@ class NextcloudClient(
         return ShareUser(id = value.getString("shareWith"), displayName = getString("label"))
     }
 
+    private fun JSONObject.toExistingShare() = ExistingShare(
+        id = get("id").toString(),
+        shareType = getInt("share_type"),
+        shareWith = nullableString("share_with"),
+        displayName = nullableString("share_with_displayname"),
+        permissions = getInt("permissions"),
+        url = nullableString("url"),
+        expireDate = nullableString("expiration")?.substringBefore(' '),
+        ownerId = nullableString("uid_owner"),
+    )
+
+    private fun JSONObject.nullableString(key: String): String? =
+        if (isNull(key)) null else optString(key).ifBlank { null }
+
+    private fun updateShareField(account: Account, id: String, field: String, value: String) {
+        val request = authenticated(account, "${shareApiUrl(account)}/$id")
+            .put(FormBody.Builder().add(field, value).build())
+            .header("OCS-APIRequest", "true")
+            .header("Accept", "application/json")
+            .build()
+        executeOcs(request)
+    }
+
     private fun createShare(account: Account, form: FormBody): ShareResult {
         val request = authenticated(
             account,
-            "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v2.php/apps/files_sharing/api/v1/shares",
+            shareApiUrl(account),
         )
             .post(form)
             .header("OCS-APIRequest", "true")
             .header("Accept", "application/json")
             .build()
 
-        return http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
-            val root = JSONObject(response.body.string()).getJSONObject("ocs")
-            val meta = root.getJSONObject("meta")
-            if (meta.getInt("statuscode") != 100 && meta.getInt("statuscode") != 200) {
-                throw IllegalStateException(meta.optString("message", "Share failed"))
-            }
-            val data = root.getJSONObject("data")
-            ShareResult(data.get("id").toString(), data.optString("url").ifBlank { null })
+        val data = executeOcs(request).getJSONObject("data")
+        return ShareResult(data.get("id").toString(), data.optString("url").ifBlank { null })
+    }
+
+    private fun shareApiUrl(account: Account) =
+        "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v2.php/apps/files_sharing/api/v1/shares"
+
+    private fun executeOcs(request: Request): JSONObject = http.newCall(request).execute().use { response ->
+        if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
+        val root = JSONObject(response.body.string()).getJSONObject("ocs")
+        val meta = root.getJSONObject("meta")
+        if (meta.getInt("statuscode") !in setOf(100, 200)) {
+            throw IllegalStateException(meta.optString("message", "Nextcloud request failed"))
         }
+        root
     }
 
     private fun authenticated(account: Account, url: String): Request.Builder = Request.Builder()

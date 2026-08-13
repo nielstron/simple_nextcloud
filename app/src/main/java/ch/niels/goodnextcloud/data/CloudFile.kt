@@ -31,10 +31,27 @@ data class ShareResult(
 data class LinkShareOptions(
     val password: String = "",
     val expireDate: String = "",
-    val allowUpload: Boolean = false,
+    val permissions: Int = 1,
 )
 
 data class ShareUser(
     val id: String,
     val displayName: String,
+)
+
+data class ExistingShare(
+    val id: String,
+    val shareType: Int,
+    val shareWith: String?,
+    val displayName: String?,
+    val permissions: Int,
+    val url: String?,
+    val expireDate: String?,
+    val ownerId: String?,
+)
+
+data class ShareUpdate(
+    val permissions: Int,
+    val expireDate: String? = null,
+    val password: String? = null,
 )
