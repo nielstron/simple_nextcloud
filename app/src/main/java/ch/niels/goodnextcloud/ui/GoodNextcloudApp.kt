@@ -14,6 +14,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -87,11 +90,17 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
@@ -102,6 +111,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import ch.niels.goodnextcloud.FileUiState
@@ -198,15 +208,22 @@ private fun LoginScreen(
                 }
                 Button(
                     onClick = { onConnect(server) },
-                    enabled = !loading && !waiting && server.isNotBlank(),
+                    enabled = !loading && (waiting || server.isNotBlank()),
                     modifier = Modifier.fillMaxWidth().padding(top = 20.dp).height(52.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) {
                     if (loading) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                    else Text(if (waiting) "Waiting for approval…" else "Log in with browser", fontWeight = FontWeight.SemiBold)
+                    else Text(if (waiting) "Open browser again" else "Log in with browser", fontWeight = FontWeight.SemiBold)
                 }
                 AnimatedVisibility(waiting) {
-                    TextButton(onClick = onCancel) { Text("Cancel") }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            "Waiting for approval. Return to this app after granting access.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = onCancel) { Text("Cancel login") }
+                    }
                 }
                 Text(
                     "Nextcloud creates a revocable app password after you approve access in the browser.",
@@ -818,10 +835,12 @@ private fun FullScreenImagePreview(
 ) {
     val initialPage = files.indexOfFirst { it.path == currentFile.path }.coerceAtLeast(0)
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { files.size })
+    var zoomedPath by remember { mutableStateOf<String?>(null) }
     val bitmap = remember(bytes) {
         bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
     }
     LaunchedEffect(pagerState.currentPage) {
+        zoomedPath = null
         val selected = files[pagerState.currentPage]
         if (selected.path != currentFile.path) onSelect(selected)
     }
@@ -834,6 +853,7 @@ private fun FullScreenImagePreview(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
                 key = { files[it].path },
+                userScrollEnabled = zoomedPath == null,
             ) { page ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     if (files[page].path == currentFile.path) {
@@ -844,11 +864,12 @@ private fun FullScreenImagePreview(
                                 modifier = Modifier.padding(32.dp),
                                 color = Color(0xFFFFB4AB),
                             )
-                            bitmap != null -> Image(
+                            bitmap != null -> ZoomablePreviewImage(
                                 bitmap = bitmap,
-                                contentDescription = "Preview of ${currentFile.name}",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Fit,
+                                name = currentFile.name,
+                                onZoomChanged = { zoomed ->
+                                    zoomedPath = if (zoomed) files[page].path else null
+                                },
                             )
                             else -> Text("Preview unavailable", color = Color.White)
                         }
@@ -896,6 +917,71 @@ private fun FullScreenImagePreview(
             }
         }
     }
+}
+
+@Composable
+private fun ZoomablePreviewImage(
+    bitmap: androidx.compose.ui.graphics.ImageBitmap,
+    name: String,
+    onZoomChanged: (Boolean) -> Unit,
+) {
+    var scale by remember(name) { mutableFloatStateOf(1f) }
+    var offset by remember(name) { mutableStateOf(Offset.Zero) }
+    var viewport by remember(name) { mutableStateOf(IntSize.Zero) }
+
+    fun constrained(candidate: Offset, atScale: Float): Offset {
+        val maxX = viewport.width * (atScale - 1f) / 2f
+        val maxY = viewport.height * (atScale - 1f) / 2f
+        return Offset(candidate.x.coerceIn(-maxX, maxX), candidate.y.coerceIn(-maxY, maxY))
+    }
+
+    fun setTransform(newScale: Float, newOffset: Offset) {
+        scale = newScale.coerceIn(1f, 5f)
+        offset = if (scale == 1f) Offset.Zero else constrained(newOffset, scale)
+        onZoomChanged(scale > 1.01f)
+    }
+
+    val transformState = rememberTransformableState { centroid, zoomChange, panChange, _ ->
+        val nextScale = (scale * zoomChange).coerceIn(1f, 5f)
+        val ratio = nextScale / scale
+        val center = Offset(viewport.width / 2f, viewport.height / 2f)
+        val nextOffset = offset * ratio + (centroid - center) * (1f - ratio) + panChange
+        setTransform(nextScale, nextOffset)
+    }
+
+    Image(
+        bitmap = bitmap,
+        contentDescription = "Preview of $name",
+        modifier = Modifier
+            .fillMaxSize()
+            .clipToBounds()
+            .onSizeChanged { viewport = it }
+            .pointerInput(name, viewport) {
+                detectTapGestures(
+                    onDoubleTap = { position ->
+                        if (scale > 1.01f) {
+                            setTransform(1f, Offset.Zero)
+                        } else {
+                            val nextScale = 2.5f
+                            val center = Offset(viewport.width / 2f, viewport.height / 2f)
+                            setTransform(nextScale, (center - position) * (nextScale - 1f))
+                        }
+                    },
+                )
+            }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offset.x
+                translationY = offset.y
+            }
+            .transformable(
+                state = transformState,
+                canPan = { scale > 1.01f },
+                lockRotationOnZoomPan = true,
+            ),
+        contentScale = ContentScale.Fit,
+    )
 }
 
 @Composable

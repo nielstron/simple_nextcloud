@@ -93,6 +93,13 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startBrowserLogin(server: String) {
+        store.loadPendingLogin()?.let { session ->
+            _state.update {
+                it.copy(loading = false, loginWaiting = true, loginUrl = session.loginUrl, error = null)
+            }
+            pollLogin(session)
+            return
+        }
         val serverUrl = NextcloudPath.normalizeServerUrl(server)
         if (!serverUrl.startsWith("https://")) {
             _state.update { it.copy(error = "Use an HTTPS Nextcloud address") }
@@ -133,8 +140,8 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             }
             val failure = result.exceptionOrNull()
             if (failure != null) {
-                _state.update { it.copy(loginWaiting = false, error = failure.userMessage()) }
-                return
+                _state.update { it.copy(error = "Still waiting for browser approval: ${failure.userMessage()}") }
+                delay(2_000)
             }
         }
         store.clearPendingLogin()
