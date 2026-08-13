@@ -387,7 +387,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val account = requireNotNull(_state.value.account)
                 shareHistory.record(account, user)
-                loadFrequentShareUsers()
+                loadFrequentShareUsers(file.isFolder)
                 loadShares(file)
             }.onFailure { failure ->
                 _state.update { it.copy(shareOperationLoading = false, shareOperationError = failure.userMessage()) }
@@ -479,9 +479,18 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun loadFrequentShareUsers() {
+    fun loadFrequentShareUsers(isFolder: Boolean) {
         val account = _state.value.account ?: return
         _state.update { it.copy(frequentShareUsers = shareHistory.frequent(account)) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val recommended = client.recommendedUsers(account, if (isFolder) "folder" else "file")
+                    shareHistory.seed(account, recommended)
+                    shareHistory.frequent(account)
+                }
+            }.onSuccess { users -> _state.update { it.copy(frequentShareUsers = users) } }
+        }
     }
 
     fun clearShareUsers() {

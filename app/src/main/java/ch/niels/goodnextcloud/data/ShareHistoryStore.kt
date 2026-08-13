@@ -20,8 +20,23 @@ class ShareHistoryStore(context: Context) {
             count = (previous?.count ?: 0) + 1,
             lastSharedAt = System.currentTimeMillis(),
         )
+        save(account, entries.values)
+    }
+
+    fun seed(account: Account, recommended: List<ShareUser>) {
+        val existing = entries(account).associateBy(Entry::id).toMutableMap()
+        recommended.forEachIndexed { index, user ->
+            existing.putIfAbsent(
+                user.id,
+                Entry(user.id, user.displayName, count = 0, lastSharedAt = -index.toLong()),
+            )
+        }
+        save(account, existing.values)
+    }
+
+    private fun save(account: Account, entries: Collection<Entry>) {
         val json = JSONArray()
-        entries.values.forEach { entry ->
+        entries.forEach { entry ->
             json.put(
                 JSONObject()
                     .put("id", entry.id)

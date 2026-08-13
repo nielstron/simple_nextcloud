@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -47,6 +48,8 @@ import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ContentPaste
@@ -55,7 +58,9 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.FolderShared
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Check
@@ -243,29 +248,24 @@ private fun LoginScreen(
     }
 }
 
-private enum class FileSort(val label: String, val comparator: Comparator<CloudFile>) {
-    NAME(
-        "Name",
-        compareBy<CloudFile> { !it.isFolder }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
-    ),
-    MODIFIED(
-        "Last modified",
-        compareBy<CloudFile> { !it.isFolder }
-            .thenByDescending { it.modifiedAt?.let(::modifiedEpochSeconds) ?: Long.MIN_VALUE }
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
-    ),
-    SIZE(
-        "Size",
-        compareBy<CloudFile> { !it.isFolder }
-            .thenByDescending(CloudFile::size)
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
-    ),
-    TYPE(
-        "Type",
-        compareBy<CloudFile> { !it.isFolder }
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.mimeType ?: it.name.substringAfterLast('.', "") }
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
-    ),
+private enum class FileSort(val label: String) {
+    NAME("Name"),
+    MODIFIED("Last modified"),
+    SIZE("Size"),
+    TYPE("Type");
+
+    fun comparator(ascending: Boolean): Comparator<CloudFile> {
+        val valueComparator = when (this) {
+            NAME -> compareBy(String.CASE_INSENSITIVE_ORDER, CloudFile::name)
+            MODIFIED -> compareBy<CloudFile> { it.modifiedAt?.let(::modifiedEpochSeconds) ?: Long.MIN_VALUE }
+                .thenBy(String.CASE_INSENSITIVE_ORDER, CloudFile::name)
+            SIZE -> compareBy(CloudFile::size).thenBy(String.CASE_INSENSITIVE_ORDER, CloudFile::name)
+            TYPE -> compareBy(String.CASE_INSENSITIVE_ORDER) { file: CloudFile ->
+                file.mimeType ?: file.name.substringAfterLast('.', "")
+            }.thenBy(String.CASE_INSENSITIVE_ORDER, CloudFile::name)
+        }
+        return compareBy<CloudFile> { !it.isFolder }.then(if (ascending) valueComparator else valueComparator.reversed())
+    }
 }
 
 private fun modifiedEpochSeconds(value: String): Long =
@@ -294,6 +294,7 @@ private fun FilesScreen(
     var sortMenuOpen by remember { mutableStateOf(false) }
     var showHiddenFiles by remember { mutableStateOf(false) }
     var fileSort by remember { mutableStateOf(FileSort.NAME) }
+    var sortAscending by remember { mutableStateOf(true) }
     val fileListState = rememberLazyListState()
     val snackbar = remember { SnackbarHostState() }
     val unfinishedUploadCount = state.uploadQueue.count {
@@ -397,6 +398,14 @@ private fun FilesScreen(
                     Box {
                         IconButton(onClick = { sortMenuOpen = true }) { Icon(Icons.AutoMirrored.Outlined.Sort, "Sort files") }
                         DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(if (sortAscending) "Ascending" else "Descending") },
+                                leadingIcon = {
+                                    Icon(if (sortAscending) Icons.Outlined.ArrowUpward else Icons.Outlined.ArrowDownward, null)
+                                },
+                                onClick = { sortAscending = !sortAscending },
+                            )
+                            HorizontalDivider()
                             FileSort.entries.forEach { option ->
                                 DropdownMenuItem(
                                     text = { Text(option.label) },
@@ -542,7 +551,7 @@ private fun FilesScreen(
                 .asSequence()
                 .filter { showHiddenFiles || !it.name.startsWith('.') }
                 .filter { it.name.contains(search, ignoreCase = true) }
-                .sortedWith(fileSort.comparator)
+                .sortedWith(fileSort.comparator(sortAscending))
                 .toList()
             LaunchedEffect(state.highlightedPath) {
                 if (state.highlightedPath != null) search = ""
@@ -635,7 +644,7 @@ private fun FilesScreen(
                 model.clearShareState()
             },
             onLoadShares = { model.loadShares(file) },
-            onLoadFrequentUsers = model::loadFrequentShareUsers,
+            onLoadFrequentUsers = { model.loadFrequentShareUsers(file.isFolder) },
             onSearchUsers = { query -> model.searchShareUsers(query, file.isFolder) },
             onShareWithUser = { user, permissions ->
                 model.share(file, user, permissions)
@@ -756,19 +765,33 @@ private fun FileRow(
             .padding(start = 18.dp, top = 12.dp, bottom = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Surface(
-            Modifier.size(46.dp),
-            RoundedCornerShape(13.dp),
-            color = if (file.isFolder) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(fileIcon(file), null, tint = if (file.isFolder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
+            Surface(
+                Modifier.fillMaxSize(),
+                RoundedCornerShape(13.dp),
+                color = if (file.isFolder) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        fileIcon(file),
+                        null,
+                        tint = if (file.isFolder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Row(Modifier.align(Alignment.BottomEnd).offset(x = 5.dp, y = 5.dp)) {
+                if (file.shareTypes.any { it != 3 }) ShareTypeBadge(Icons.Outlined.Person)
+                if (3 in file.shareTypes) ShareTypeBadge(Icons.Outlined.Link)
             }
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
             Text(
-                if (file.isFolder) "Folder" else listOf(formatSize(file.size), formatDate(file.modifiedAt)).filter(String::isNotBlank).joinToString(" · "),
+                when {
+                    file.isIncomingShare -> "Shared by ${file.ownerDisplayName ?: file.ownerId ?: "another user"}"
+                    file.isFolder -> "Folder"
+                    else -> listOf(formatSize(file.size), formatDate(file.modifiedAt)).filter(String::isNotBlank).joinToString(" · ")
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -792,6 +815,18 @@ private fun FileRow(
 @Composable
 private fun FileMenuItem(label: String, icon: ImageVector, onClick: () -> Unit) {
     DropdownMenuItem(text = { Text(label) }, leadingIcon = { Icon(icon, null) }, onClick = onClick)
+}
+
+@Composable
+private fun ShareTypeBadge(icon: ImageVector) {
+    Surface(
+        modifier = Modifier.size(18.dp),
+        shape = RoundedCornerShape(9.dp),
+        color = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+    ) {
+        Box(contentAlignment = Alignment.Center) { Icon(icon, null, Modifier.size(12.dp)) }
+    }
 }
 
 @Composable
@@ -1135,10 +1170,10 @@ private fun ShareDialog(
     var showLinkOptions by remember { mutableStateOf(false) }
     val validExpiry = expiry.isBlank() || runCatching { LocalDate.parse(expiry) >= LocalDate.now() }.getOrDefault(false)
     val alreadySharedUserIds = shares.filter { it.shareType == 0 }.mapNotNull(ExistingShare::shareWith).toSet()
-    val candidates = (if (userQuery.isBlank()) frequentUsers else users)
+    val candidates = if (sharesLoading) emptyList() else (if (userQuery.isBlank()) frequentUsers else users)
         .filterNot { it.id in alreadySharedUserIds }
     val availableUsers = if (userQuery.isBlank()) candidates.take(3) else candidates
-    val effectiveSelection = selectedUser?.takeUnless { it.id in alreadySharedUserIds }
+    val effectiveSelection = selectedUser?.takeUnless { sharesLoading || it.id in alreadySharedUserIds }
     val displayedUsers = effectiveSelection?.let(::listOf) ?: availableUsers
     LaunchedEffect(file.path) {
         onLoadShares()
@@ -1495,6 +1530,7 @@ private fun EmptyFolder(message: String) {
 }
 
 private fun fileIcon(file: CloudFile): ImageVector = when {
+    file.isIncomingShare -> Icons.Outlined.FolderShared
     file.isFolder -> Icons.Outlined.Folder
     file.mimeType?.startsWith("image/") == true -> Icons.Outlined.Image
     file.mimeType == "application/pdf" -> Icons.Outlined.PictureAsPdf

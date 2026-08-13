@@ -67,8 +67,8 @@ class NextcloudClient(
 
     fun list(account: Account, path: String): List<CloudFile> {
         val body = """<?xml version="1.0"?>
-            <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
-              <d:prop><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/><d:getetag/><oc:fileid/></d:prop>
+            <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+              <d:prop><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/><d:getetag/><oc:fileid/><oc:owner-id/><oc:owner-display-name/><oc:share-types/><nc:mount-type/></d:prop>
             </d:propfind>""".trimIndent()
         val request = authenticated(account, NextcloudPath.davUrl(account, path))
             .method("PROPFIND", body.toRequestBody("application/xml".toMediaTypeOrNull()))
@@ -283,6 +283,23 @@ class NextcloudClient(
         }
     }
 
+    fun recommendedUsers(account: Account, itemType: String): List<ShareUser> {
+        val url = "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v1.php/apps/files_sharing/api/v1/sharees_recommended"
+            .toHttpUrl()
+            .newBuilder()
+            .addQueryParameter("itemType", itemType)
+            .build()
+        val request = authenticated(account, url.toString())
+            .get()
+            .header("OCS-APIRequest", "true")
+            .header("Accept", "application/json")
+            .build()
+        return http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
+            parseShareUsers(response.body.string())
+        }
+    }
+
     internal fun parseShareUsers(json: String): List<ShareUser> {
         val data = JSONObject(json).getJSONObject("ocs").getJSONObject("data")
         val result = buildList {
@@ -384,6 +401,10 @@ class NextcloudClient(
                     "getlastmodified" -> current.modified = parser.nextText().ifBlank { null }
                     "getetag" -> current.etag = parser.nextText().trim('"').ifBlank { null }
                     "fileid" -> current.fileId = parser.nextText().ifBlank { null }
+                    "owner-id" -> current.ownerId = parser.nextText().ifBlank { null }
+                    "owner-display-name" -> current.ownerDisplayName = parser.nextText().ifBlank { null }
+                    "mount-type" -> current.mountType = parser.nextText().ifBlank { null }
+                    "share-type" -> current.shareTypes += parser.nextText().toInt()
                 }
             } else if (event == XmlPullParser.END_TAG && parser.name.equals("response", true)) {
                 current.toFile(username)?.let(files::add)
@@ -401,11 +422,28 @@ class NextcloudClient(
         var modified: String? = null,
         var etag: String? = null,
         var fileId: String? = null,
+        var ownerId: String? = null,
+        var ownerDisplayName: String? = null,
+        var mountType: String? = null,
+        var shareTypes: Set<Int> = emptySet(),
     ) {
         fun toFile(username: String): CloudFile? {
             val path = href?.let { NextcloudPath.relativePathFromDavHref(it, username) } ?: return null
             val name = path.substringAfterLast('/', path)
-            return CloudFile(name, path, folder, size, mime, modified, etag, fileId)
+            return CloudFile(
+                name,
+                path,
+                folder,
+                size,
+                mime,
+                modified,
+                etag,
+                fileId,
+                ownerId,
+                ownerDisplayName,
+                mountType,
+                shareTypes,
+            )
         }
     }
 }

@@ -9,7 +9,13 @@ data class CloudFile(
     val modifiedAt: String?,
     val etag: String?,
     val fileId: String? = null,
-)
+    val ownerId: String? = null,
+    val ownerDisplayName: String? = null,
+    val mountType: String? = null,
+    val shareTypes: Set<Int> = emptySet(),
+) {
+    val isIncomingShare: Boolean get() = isFolder && mountType == "shared"
+}
 
 data class Account(
     val serverUrl: String,
