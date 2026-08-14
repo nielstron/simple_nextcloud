@@ -1,16 +1,16 @@
-# Good Nextcloud
+<div align="center">
+  <img src="docs/app-icon.svg" width="72" height="72" alt="Simple Nextcloud app icon">
+</div>
 
-A deliberately small Android Nextcloud client for three workflows:
+<p align="center"><strong>Simple Nextcloud</strong></p>
 
-- Navigate folders and search the current folder.
-- Upload through Android's system document picker and download through the system save dialog.
-- Share with another Nextcloud user or create a public link.
-- Copy or move with a navigation clipboard; rename, delete, and download folders as ZIP archives.
-- Queue multiple-file and recursive folder uploads while continuing to browse.
+A deliberately small Android Nextcloud client for minimal usability:
 
-Folder listings are kept briefly in a bounded, memory-only cache so back navigation and repeat visits are immediate. As soon as a folder opens, the app prefetches metadata for up to two likely next folders based on recent and frequent visits. Opening the active target adopts its in-flight request; navigating elsewhere cancels it. The app never caches or prefetches file contents.
-
-The app uses Nextcloud WebDAV for files and the OCS Share API for sharing. It only accepts HTTPS server addresses and stores the username and app password encrypted with Android Keystore.
+- Navigate the Nextcloud file system.
+- Upload and download files or folders.
+- Move, copy, rename, or create files and folders.
+- Share files with other users or public links.
+- Register in Android as a share-target and as a file system to save files to or pick files from.
 
 ## Build
 
@@ -19,7 +19,3 @@ The app uses Nextcloud WebDAV for files and the OCS Share API for sharing. It on
 ```
 
 Open the project in Android Studio or install `app/build/outputs/apk/debug/app-debug.apk` on a device running Android 8 or newer.
-
-## Sign in
-
-Create a dedicated app password in **Nextcloud → Personal settings → Security**, then enter the server base URL, username and app password. The server may be installed at the domain root or below a path.

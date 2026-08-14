@@ -29,7 +29,7 @@ class NextcloudClient(
         val request = Request.Builder()
             .url("${NextcloudPath.normalizeServerUrl(serverUrl)}/index.php/login/v2")
             .post(FormBody.Builder().build())
-            .header("User-Agent", "GoodNextcloud/0.1")
+            .header("User-Agent", "SimpleNextcloud/0.1")
             .build()
         return http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
@@ -41,7 +41,7 @@ class NextcloudClient(
         val request = Request.Builder()
             .url(session.pollEndpoint)
             .post(FormBody.Builder().add("token", session.token).build())
-            .header("User-Agent", "GoodNextcloud/0.1")
+            .header("User-Agent", "SimpleNextcloud/0.1")
             .build()
         return http.newCall(request).execute().use { response ->
             if (response.code == 404) return null
@@ -204,6 +204,9 @@ class NextcloudClient(
     }
 
     fun createLink(account: Account, path: String, options: LinkShareOptions): ShareResult {
+        if (options.password.isNotBlank()) {
+            validateSharePassword(account, options.password)?.let { throw IllegalArgumentException(it) }
+        }
         val form = FormBody.Builder()
             .add("path", "/${path.trimStart('/')}")
             .add("shareType", "3")
@@ -215,6 +218,22 @@ class NextcloudClient(
             }
             .build()
         return createShare(account, form)
+    }
+
+    fun validateSharePassword(account: Account, password: String): String? {
+        val request = authenticated(
+            account,
+            "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v2.php/apps/password_policy/api/v1/validate",
+        )
+            .post(FormBody.Builder().add("password", password).add("context", "sharing").build())
+            .header("OCS-APIRequest", "true")
+            .header("Accept", "application/json")
+            .build()
+        return http.newCall(request).execute().use { response ->
+            if (response.code == 404) return null
+            val data = parseOcs(response.code, response.message, response.body.string()).getJSONObject("data")
+            if (data.getBoolean("passed")) null else data.getString("reason")
+        }
     }
 
     fun listShares(account: Account, path: String): List<ExistingShare> {
@@ -357,19 +376,25 @@ class NextcloudClient(
         "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v2.php/apps/files_sharing/api/v1/shares"
 
     private fun executeOcs(request: Request): JSONObject = http.newCall(request).execute().use { response ->
-        if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
-        val root = JSONObject(response.body.string()).getJSONObject("ocs")
-        val meta = root.getJSONObject("meta")
-        if (meta.getInt("statuscode") !in setOf(100, 200)) {
-            throw IllegalStateException(meta.optString("message", "Nextcloud request failed"))
+        parseOcs(response.code, response.message, response.body.string())
+    }
+
+    internal fun parseOcs(httpCode: Int, httpMessage: String, body: String): JSONObject {
+        val root = runCatching { JSONObject(body).getJSONObject("ocs") }.getOrElse {
+            throw NextcloudException(httpCode, httpMessage)
         }
-        root
+        val meta = root.getJSONObject("meta")
+        val ocsCode = meta.getInt("statuscode")
+        if (httpCode !in 200..299 || ocsCode !in setOf(100, 200)) {
+            throw NextcloudException(httpCode, meta.optString("message", httpMessage))
+        }
+        return root
     }
 
     private fun authenticated(account: Account, url: String): Request.Builder = Request.Builder()
         .url(url)
         .header("Authorization", Credentials.basic(account.username, account.appPassword))
-        .header("User-Agent", "GoodNextcloud/0.1")
+        .header("User-Agent", "SimpleNextcloud/0.1")
 
     private fun executeEmpty(request: Request, accepted: Set<Int>) {
         http.newCall(request).execute().use { response ->

@@ -143,7 +143,7 @@ import kotlin.math.pow
 import kotlinx.coroutines.delay
 
 @Composable
-fun GoodNextcloudApp(
+fun SimpleNextcloudApp(
     state: FileUiState,
     model: FileViewModel,
     sharedUris: List<android.net.Uri> = emptyList(),
@@ -1363,6 +1363,14 @@ private fun ShareDialog(
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 ) {
                     Text("Create and copy link")
+                }
+                if (operationError != null) {
+                    Text(
+                        operationError,
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
                 }
             }

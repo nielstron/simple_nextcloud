@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "GoodNextcloud"
+rootProject.name = "SimpleNextcloud"
 include(":app")

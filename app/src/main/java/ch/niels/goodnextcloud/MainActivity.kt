@@ -10,8 +10,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.IntentCompat
-import ch.niels.goodnextcloud.ui.GoodNextcloudApp
-import ch.niels.goodnextcloud.ui.GoodNextcloudTheme
+import ch.niels.goodnextcloud.ui.SimpleNextcloudApp
+import ch.niels.goodnextcloud.ui.SimpleNextcloudTheme
 
 class MainActivity : ComponentActivity() {
     private val sharedUris = mutableStateOf<List<Uri>>(emptyList())
@@ -20,10 +20,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         receiveShareIntent(intent)
         setContent {
-            GoodNextcloudTheme {
+            SimpleNextcloudTheme {
                 val model: FileViewModel = viewModel()
                 val state by model.state.collectAsStateWithLifecycle()
-                GoodNextcloudApp(
+                SimpleNextcloudApp(
                     state = state,
                     model = model,
                     sharedUris = sharedUris.value,

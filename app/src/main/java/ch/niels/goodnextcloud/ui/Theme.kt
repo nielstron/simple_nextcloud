@@ -27,7 +27,7 @@ private val DarkColors = darkColorScheme(
 )
 
 @Composable
-fun GoodNextcloudTheme(content: @Composable () -> Unit) {
+fun SimpleNextcloudTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
         content = content,
