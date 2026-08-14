@@ -24,6 +24,10 @@ Most importantly for me, it distinguishes itself from the official Nextcloud cli
   <img src="docs/screenshots/sharing.png" width="200" alt="Folder sharing screen">
 </div>
 
+## Installation
+
+Download and install the APK from the [Releases page](https://github.com/nielstron/simple_nextcloud/releases). You may have to click through a few scary screens that ask you whether you are installing malware (you are not).
+
 ## Build
 
 ```sh
