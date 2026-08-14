@@ -208,9 +208,10 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun up() {
-        clearHighlight()
-        val parent = _state.value.path.substringBeforeLast('/', "")
+        val child = _state.value.path
+        val parent = child.substringBeforeLast('/', "")
         loadPath(parent)
+        _state.update { it.copy(highlightedPath = child) }
     }
 
     fun loadPath(path: String, forceRefresh: Boolean = false) {

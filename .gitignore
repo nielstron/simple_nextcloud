@@ -1,4 +1,5 @@
 *.iml
+.vscode
 .gradle
 /local.properties
 /.idea
