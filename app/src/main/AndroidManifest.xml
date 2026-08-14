@@ -41,6 +41,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+        <activity-alias
+            android:name=".ShareTarget"
+            android:exported="true"
+            android:label="@string/share_target_label"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -51,6 +57,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
-        </activity>
+        </activity-alias>
     </application>
 </manifest>

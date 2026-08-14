@@ -22,6 +22,8 @@ Most importantly for me, it distinguishes itself from the official Nextcloud cli
   <img src="docs/screenshots/file-actions.png" width="200" alt="File browser with file actions menu">
   <img src="docs/screenshots/sorting.png" width="200" alt="File browser sorting menu">
   <img src="docs/screenshots/sharing.png" width="200" alt="Folder sharing screen">
+  <img src="docs/screenshots/android-file-picker.png" width="200" alt="Simple Nextcloud in the Android file picker">
+  <img src="docs/screenshots/android-share-sheet.png" width="200" alt="Simple Nextcloud in the Android share sheet">
 </div>
 
 ## Installation
