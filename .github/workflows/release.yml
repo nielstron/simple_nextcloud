@@ -1,0 +1,72 @@
+name: Release APK
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Read app version
+        id: version
+        shell: bash
+        run: |
+          app_version="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"/\1/p' app/build.gradle.kts)"
+          test -n "$app_version"
+          echo "version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$app_version" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Java
+        if: steps.release.outputs.exists == 'false'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Test and build APK
+        if: steps.release.outputs.exists == 'false'
+        run: ./gradlew test assembleDebug --no-daemon
+
+      - name: Prepare release asset
+        if: steps.release.outputs.exists == 'false'
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: cp app/build/outputs/apk/debug/app-debug.apk "simple-nextcloud-$APP_VERSION.apk"
+
+      - name: Create GitHub release
+        if: steps.release.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" "simple-nextcloud-$APP_VERSION.apk" \
+            --target "$GITHUB_SHA" \
+            --title "Simple Nextcloud $APP_VERSION" \
+            --generate-notes
