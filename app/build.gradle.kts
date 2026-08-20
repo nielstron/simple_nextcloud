@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "ch.niels.goodnextcloud"
+    namespace = "de.nielstron.simplenextcloud"
     compileSdk = 37
 
     defaultConfig {
