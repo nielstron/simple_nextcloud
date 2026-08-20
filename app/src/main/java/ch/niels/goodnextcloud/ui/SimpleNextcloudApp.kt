@@ -13,7 +13,6 @@ import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
@@ -156,6 +155,7 @@ fun SimpleNextcloudApp(
     model: FileViewModel,
     sharedUris: List<android.net.Uri> = emptyList(),
     onSharedUrisConsumed: () -> Unit = {},
+    onOpenLoginUrl: (String) -> Unit,
 ) {
     if (state.account == null) {
         LoginScreen(
@@ -164,7 +164,9 @@ fun SimpleNextcloudApp(
             error = state.error,
             loginUrl = state.loginUrl,
             onConnect = model::startBrowserLogin,
+            onRestart = model::restartBrowserLogin,
             onLoginUrlOpened = model::consumeLoginUrl,
+            onOpenLoginUrl = onOpenLoginUrl,
             onCancel = model::cancelBrowserLogin,
             onClearError = model::clearNotice,
         )
@@ -180,18 +182,16 @@ private fun LoginScreen(
     error: String?,
     loginUrl: String?,
     onConnect: (String) -> Unit,
+    onRestart: () -> Unit,
     onLoginUrlOpened: () -> Unit,
+    onOpenLoginUrl: (String) -> Unit,
     onCancel: () -> Unit,
     onClearError: () -> Unit,
 ) {
     var server by remember { mutableStateOf("") }
-    val context = LocalContext.current
     LaunchedEffect(loginUrl) {
         loginUrl?.let { url ->
-            CustomTabsIntent.Builder()
-                .setShowTitle(true)
-                .build()
-                .launchUrl(context, android.net.Uri.parse(url))
+            onOpenLoginUrl(url)
             onLoginUrlOpened()
         }
     }
@@ -230,18 +230,20 @@ private fun LoginScreen(
                     )
                 }
                 Button(
-                    onClick = { onConnect(server) },
+                    onClick = { if (waiting) onRestart() else onConnect(server) },
                     enabled = !loading && (waiting || server.isNotBlank()),
                     modifier = Modifier.fillMaxWidth().padding(top = 20.dp).height(52.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) {
                     if (loading) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                    else Text(if (waiting) "Open browser again" else "Log in with browser", fontWeight = FontWeight.SemiBold)
+                    else Text(if (waiting) "Restart login" else "Log in with browser", fontWeight = FontWeight.SemiBold)
                 }
                 AnimatedVisibility(waiting) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            "Waiting for approval. Return to this app after granting access.",
+                            "Waiting for approval. Return to this app after granting access. " +
+                                "If the browser reports an expired or outdated login request, " +
+                                "that is normal after an interruption—return here and tap Restart login.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

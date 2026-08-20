@@ -14,6 +14,8 @@ object NextcloudPath {
         }
     }
 
+    fun serverRoot(url: String): String = URI(url).run { "$scheme://$authority" }
+
     fun encodePath(path: String): String = path
         .split('/')
         .filter(String::isNotEmpty)

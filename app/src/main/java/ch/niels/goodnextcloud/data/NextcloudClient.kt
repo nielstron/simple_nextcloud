@@ -5,6 +5,7 @@ import android.net.Uri
 import java.io.OutputStream
 import java.io.File
 import android.util.Xml
+import ch.niels.goodnextcloud.BuildConfig
 import okhttp3.Credentials
 import okhttp3.Call
 import okhttp3.Callback
@@ -27,6 +28,7 @@ import org.xmlpull.v1.XmlPullParser
 class NextcloudClient(
     private val http: OkHttpClient = OkHttpClient(),
 ) {
+    private val userAgent = "SimpleNextcloud/${BuildConfig.VERSION_NAME}"
     @Volatile
     private var previewServiceFailed = false
 
@@ -34,7 +36,7 @@ class NextcloudClient(
         val request = Request.Builder()
             .url("${NextcloudPath.normalizeServerUrl(serverUrl)}/index.php/login/v2")
             .post(FormBody.Builder().build())
-            .header("User-Agent", "SimpleNextcloud/0.1")
+            .header("User-Agent", userAgent)
             .build()
         return http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw NextcloudException(response.code, response.message)
@@ -46,7 +48,7 @@ class NextcloudClient(
         val request = Request.Builder()
             .url(session.pollEndpoint)
             .post(FormBody.Builder().add("token", session.token).build())
-            .header("User-Agent", "SimpleNextcloud/0.1")
+            .header("User-Agent", userAgent)
             .build()
         return http.newCall(request).execute().use { response ->
             if (response.code == 404) return null
@@ -421,7 +423,7 @@ class NextcloudClient(
     private fun authenticated(account: Account, url: String): Request.Builder = Request.Builder()
         .url(url)
         .header("Authorization", Credentials.basic(account.username, account.appPassword))
-        .header("User-Agent", "SimpleNextcloud/0.1")
+        .header("User-Agent", userAgent)
 
     private fun executeEmpty(request: Request, accepted: Set<Int>) {
         http.newCall(request).execute().use { response ->

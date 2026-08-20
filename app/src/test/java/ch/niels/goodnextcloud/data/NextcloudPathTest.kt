@@ -4,6 +4,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class NextcloudPathTest {
+    @Test
+    fun `extracts server root from login flow URL`() {
+        assertEquals(
+            "https://cloud.example.com",
+            NextcloudPath.serverRoot("https://cloud.example.com/login/v2/flow/token"),
+        )
+    }
+
     private val account = Account("https://cloud.example.com/", "niels@example.com", "secret")
 
     @Test

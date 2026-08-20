@@ -112,24 +112,32 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startBrowserLogin(server: String) {
-        store.loadPendingLogin()?.let { pendingLogin ->
+        beginBrowserLogin(server)
+    }
+
+    fun restartBrowserLogin() {
+        val pendingLogin = store.loadPendingLogin()
+        if (pendingLogin == null) {
             _state.update {
                 it.copy(
-                    loading = false,
-                    loginWaiting = true,
-                    loginUrl = pendingLogin.session.loginUrl,
-                    error = null,
+                    loginWaiting = false,
+                    error = "That login request expired. This is normal after an interruption. " +
+                        "Enter your Nextcloud address and try again.",
                 )
             }
-            pollLogin(pendingLogin)
             return
         }
+        beginBrowserLogin(NextcloudPath.serverRoot(pendingLogin.session.loginUrl))
+    }
+
+    private fun beginBrowserLogin(server: String) {
         val serverUrl = NextcloudPath.normalizeServerUrl(server)
         if (!serverUrl.startsWith("https://")) {
             _state.update { it.copy(error = "Use an HTTPS Nextcloud address") }
             return
         }
         loginJob?.cancel()
+        store.clearPendingLogin()
         _state.update { it.copy(loading = true, loginWaiting = false, error = null) }
         loginJob = viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { client.initiateLogin(serverUrl) } }
@@ -167,12 +175,23 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             }
             val failure = result.exceptionOrNull()
             if (failure != null) {
-                _state.update { it.copy(error = "Still waiting for browser approval: ${failure.userMessage()}") }
+                _state.update {
+                    it.copy(
+                        error = "Browser approval is still pending. Temporary failures can be normal; " +
+                            "tap Restart login to retry. Details: ${failure.userMessage()}",
+                    )
+                }
                 delay(2_000)
             }
         }
         store.clearPendingLogin()
-        _state.update { it.copy(loginWaiting = false, error = "Login approval expired. Try again.") }
+        _state.update {
+            it.copy(
+                loginWaiting = false,
+                error = "Login approval expired. This is normal after an interruption. " +
+                    "Enter your Nextcloud address and try again.",
+            )
+        }
     }
 
     private suspend fun finishLogin(account: Account) {
