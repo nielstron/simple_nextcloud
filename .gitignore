@@ -6,3 +6,7 @@
 .DS_Store
 /build
 /app/build
+keystore.properties
+*.jks
+*.keystore
+*.aab
