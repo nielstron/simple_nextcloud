@@ -19,6 +19,7 @@ import ch.niels.goodnextcloud.data.NextcloudClient
 import ch.niels.goodnextcloud.data.NextcloudPath
 import ch.niels.goodnextcloud.data.ShareUser
 import ch.niels.goodnextcloud.data.ShareHistoryStore
+import ch.niels.goodnextcloud.data.persistentFolderListingCache
 import ch.niels.goodnextcloud.data.ShareUpdate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -78,7 +79,10 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private val store = AccountStore(application)
     private val client = NextcloudClient()
     private val shareHistory = ShareHistoryStore(application)
-    private val folderCache = FolderListingCache()
+    private val initialAccount = store.load()
+    private var folderCache = initialAccount?.let {
+        persistentFolderListingCache(application, it)
+    } ?: FolderListingCache()
     private var navigationJob: Job? = null
     private var prefetchJob: Job? = null
     private var prefetchTarget: String? = null
@@ -88,7 +92,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var loginJob: Job? = null
     private var nextUploadId = 1L
     private val uploadJobs = ArrayDeque<UploadJob>()
-    private val _state = MutableStateFlow(FileUiState(account = store.load()))
+    private val _state = MutableStateFlow(FileUiState(account = initialAccount))
     val state = _state.asStateFlow()
 
     init {
@@ -159,7 +163,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun finishLogin(account: Account) {
-        folderCache.clear()
+        folderCache = persistentFolderListingCache(getApplication(), account)
         _state.update { it.copy(loading = true, loginWaiting = false, error = null) }
         runCatching { withContext(Dispatchers.IO) { client.list(account, "") } }
                 .onSuccess { files ->
@@ -220,7 +224,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         val previousPath = _state.value.path
         val previousFiles = _state.value.files
         val cached = folderCache.get(normalizedPath)
-        folderCache.recordVisit(normalizedPath)
+        if (cached == null) folderCache.recordVisit(normalizedPath)
         val adoptsPrefetch = !forceRefresh && prefetchJob?.isActive == true && prefetchTarget == normalizedPath
         if (!adoptsPrefetch) {
             prefetchJob?.cancel()
@@ -235,15 +239,11 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         navigationJob?.cancel()
-        if (!forceRefresh && folderCache.isFresh(normalizedPath)) {
-            schedulePrefetch(account, requireNotNull(cached).files)
-            return
-        }
         // The speculative request already fetches exactly this listing. Let it become foreground work
         // instead of cancelling it and sending a duplicate PROPFIND.
         if (adoptsPrefetch) return
         navigationJob = viewModelScope.launch {
-            runCatching { withContext(Dispatchers.IO) { client.list(account, normalizedPath) } }
+            runCatching { client.listCancellable(account, normalizedPath) }
                 .onSuccess { files ->
                     val sorted = files.sortedFiles()
                     folderCache.put(normalizedPath, sorted)
@@ -607,7 +607,6 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }.onSuccess { files ->
                 val sorted = files.sortedFiles()
-                folderCache.clear()
                 folderCache.put(currentPath, sorted)
                 _state.update {
                     it.copy(
@@ -658,7 +657,6 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }.onSuccess {
                     updateUpload(job.item.id, UploadStatus.COMPLETED)
-                    folderCache.remove(job.item.targetPath)
                     if (_state.value.path == job.item.targetPath) refresh()
                 }.onFailure { failure ->
                     updateUpload(job.item.id, UploadStatus.FAILED, failure.userMessage())
@@ -704,7 +702,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             if (_state.value.loading) return@launch
             folderCache.preferred(candidates, PREFETCH_FOLDER_LIMIT).forEach { folderPath ->
                 prefetchTarget = folderPath
-                runCatching { withContext(Dispatchers.IO) { client.list(account, folderPath) } }
+                runCatching { client.listCancellable(account, folderPath) }
                     .onSuccess { files ->
                         val sorted = files.sortedFiles()
                         folderCache.put(folderPath, sorted)

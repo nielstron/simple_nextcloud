@@ -6,11 +6,16 @@ import java.io.OutputStream
 import java.io.File
 import android.util.Xml
 import okhttp3.Credentials
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.IOException
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -66,20 +71,42 @@ class NextcloudClient(
     }
 
     fun list(account: Account, path: String): List<CloudFile> {
+        return http.newCall(listRequest(account, path)).execute().use { response ->
+            parseListResponse(response, account, path)
+        }
+    }
+
+    suspend fun listCancellable(account: Account, path: String): List<CloudFile> =
+        suspendCancellableCoroutine { continuation ->
+            val call = http.newCall(listRequest(account, path))
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWith(Result.failure(e))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = runCatching { response.use { parseListResponse(it, account, path) } }
+                    if (continuation.isActive) continuation.resumeWith(result)
+                }
+            })
+        }
+
+    private fun listRequest(account: Account, path: String): Request {
         val body = """<?xml version="1.0"?>
             <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
               <d:prop><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/><d:getetag/><oc:fileid/><oc:owner-id/><oc:owner-display-name/><oc:share-types/><nc:mount-type/></d:prop>
             </d:propfind>""".trimIndent()
-        val request = authenticated(account, NextcloudPath.davUrl(account, path))
+        return authenticated(account, NextcloudPath.davUrl(account, path))
             .method("PROPFIND", body.toRequestBody("application/xml".toMediaTypeOrNull()))
             .header("Depth", "1")
             .build()
+    }
 
-        return http.newCall(request).execute().use { response ->
-            if (response.code != 207) throw NextcloudException(response.code, response.message)
-            parseFiles(response.body.byteStream(), account.username)
-                .filterNot { it.path.trim('/') == path.trim('/') }
-        }
+    private fun parseListResponse(response: Response, account: Account, path: String): List<CloudFile> {
+        if (response.code != 207) throw NextcloudException(response.code, response.message)
+        return parseFiles(response.body.byteStream(), account.username)
+            .filterNot { it.path.trim('/') == path.trim('/') }
     }
 
     fun upload(
