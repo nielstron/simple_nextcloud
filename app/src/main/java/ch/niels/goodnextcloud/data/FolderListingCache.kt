@@ -16,6 +16,7 @@ class FolderListingCache(
     private val entrySize: (String, Entry, Usage) -> Long = { path, entry, usage ->
         estimatedSize(path, entry, usage)
     },
+    private val usageAffectsSize: Boolean = true,
 ) {
     data class Entry(val files: List<CloudFile>, val fetchedAt: Long)
 
@@ -79,7 +80,7 @@ class FolderListingCache(
         val usage = previous.copy(count = previous.count + 1, lastVisitedAt = clock())
         visits[normalizedPath] = usage
         store.recordVisit(normalizedPath, usage)
-        entries.entries.firstOrNull { it.key == normalizedPath }?.value?.let { entry ->
+        if (usageAffectsSize) entries.entries.firstOrNull { it.key == normalizedPath }?.value?.let { entry ->
             storageBytes -= entrySizes.remove(normalizedPath) ?: 0
             val size = entrySize(normalizedPath, entry, usage)
             entrySizes[normalizedPath] = size
