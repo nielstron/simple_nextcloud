@@ -13,7 +13,7 @@ A deliberately small Android Nextcloud client for minimal usability:
 - Share files with other users or public links.
 - Register in Android as a share-target and as a file system to save files to or pick files from.
 
-Most importantly for me, it distinguishes itself from the official Nextcloud client by _not storing all uploaded files in a duplicated, hidden cache_.
+Most importantly for me, it distinguishes itself from the official Nextcloud client by _not storing all uploaded files in a duplicated, hidden cache_. Meanwhile there is a purpose-built cache to make usage more convenient (e.g., caching folder metadata/contents).
 
 ## Screenshots
 
