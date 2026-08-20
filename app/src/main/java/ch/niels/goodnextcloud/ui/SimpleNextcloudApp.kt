@@ -7,6 +7,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.widget.MediaController
+import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -112,6 +115,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
@@ -129,6 +133,8 @@ import ch.niels.goodnextcloud.FileViewModel
 import ch.niels.goodnextcloud.ClipboardMode
 import ch.niels.goodnextcloud.UploadQueueItem
 import ch.niels.goodnextcloud.UploadStatus
+import ch.niels.goodnextcloud.previewableFiles
+import ch.niels.goodnextcloud.data.Account
 import ch.niels.goodnextcloud.data.CloudFile
 import ch.niels.goodnextcloud.data.ExistingShare
 import ch.niels.goodnextcloud.data.LinkShareOptions
@@ -141,6 +147,7 @@ import java.time.format.DateTimeFormatter
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlinx.coroutines.delay
+import okhttp3.Credentials
 
 @Composable
 fun SimpleNextcloudApp(
@@ -588,7 +595,8 @@ private fun FilesScreen(
                             onOpen = {
                                 when {
                                     file.isFolder -> model.open(file)
-                                    file.mimeType?.startsWith("image/") == true -> model.showPreview(file)
+                                    file.mimeType?.let { it.startsWith("image/") || it.startsWith("video/") } == true ->
+                                        model.showPreview(file)
                                     else -> model.openLocally(file)
                                 }
                             },
@@ -608,8 +616,9 @@ private fun FilesScreen(
 
     state.previewFile?.let { file ->
         FullScreenImagePreview(
-            files = state.files.filter { it.mimeType?.startsWith("image/") == true },
+            files = previewableFiles(state.files),
             currentFile = file,
+            account = requireNotNull(state.account),
             bytes = state.previewBytes,
             loading = state.previewLoading,
             error = state.previewError,
@@ -979,6 +988,7 @@ private fun UploadQueueDialog(
 private fun FullScreenImagePreview(
     files: List<CloudFile>,
     currentFile: CloudFile,
+    account: Account,
     bytes: ByteArray?,
     loading: Boolean,
     error: String?,
@@ -1012,6 +1022,10 @@ private fun FullScreenImagePreview(
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     if (files[page].path == currentFile.path) {
                         when {
+                            currentFile.mimeType?.startsWith("video/") == true -> AuthenticatedVideoPreview(
+                                file = currentFile,
+                                account = account,
+                            )
                             loading -> CircularProgressIndicator(color = Color.White)
                             error != null -> Text(
                                 error,
@@ -1070,6 +1084,44 @@ private fun FullScreenImagePreview(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AuthenticatedVideoPreview(file: CloudFile, account: Account) {
+    var loading by remember(file.path, file.etag) { mutableStateOf(true) }
+    var error by remember(file.path, file.etag) { mutableStateOf<String?>(null) }
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { context ->
+                VideoView(context).apply {
+                    val controls = MediaController(context)
+                    controls.setAnchorView(this)
+                    setMediaController(controls)
+                    setOnPreparedListener {
+                        loading = false
+                        start()
+                    }
+                    setOnErrorListener { _, what, extra ->
+                        loading = false
+                        error = "Video playback failed ($what/$extra)"
+                        true
+                    }
+                    setVideoURI(
+                        Uri.parse(NextcloudPath.davUrl(account, file.path)),
+                        mapOf(
+                            "Authorization" to Credentials.basic(account.username, account.appPassword),
+                            "User-Agent" to "SimpleNextcloud/0.1",
+                            "android-allow-cross-domain-redirect" to "0",
+                        ),
+                    )
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            onRelease = VideoView::stopPlayback,
+        )
+        if (loading) CircularProgressIndicator(color = Color.White)
+        error?.let { Text(it, modifier = Modifier.padding(32.dp), color = Color(0xFFFFB4AB)) }
     }
 }
 

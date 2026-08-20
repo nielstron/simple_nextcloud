@@ -518,6 +518,13 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     fun showPreview(file: CloudFile) {
         val account = _state.value.account ?: return
         previewJob?.cancel()
+        if (file.mimeType?.startsWith("video/") == true) {
+            _state.update {
+                it.copy(previewFile = file, previewBytes = null, previewLoading = false, previewError = null)
+            }
+            prefetchAdjacentImages(account, file)
+            return
+        }
         val adoptedPrefetch = imagePrefetches
             .firstOrNull { it.file.samePreviewVersion(file) }
             ?.bytes
@@ -567,7 +574,8 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun prefetchAdjacentImages(account: Account, current: CloudFile) {
-        val targets = adjacentImages(_state.value.files, current)
+        val targets = adjacentPreviewFiles(_state.value.files, current)
+            .filter { it.mimeType?.startsWith("image/") == true }
         imagePrefetches
             .filterNot { existing -> targets.any(existing.file::samePreviewVersion) }
             .forEach { it.bytes.cancel() }
@@ -762,11 +770,15 @@ private sealed interface UploadSource {
     data class Folder(val uri: Uri) : UploadSource
 }
 
-internal fun adjacentImages(files: List<CloudFile>, current: CloudFile): List<CloudFile> {
-    val images = files.filter { it.mimeType?.startsWith("image/") == true }
-    val currentIndex = images.indexOfFirst { it.path == current.path }
+internal fun previewableFiles(files: List<CloudFile>): List<CloudFile> = files.filter { file ->
+    file.mimeType?.let { it.startsWith("image/") || it.startsWith("video/") } == true
+}
+
+internal fun adjacentPreviewFiles(files: List<CloudFile>, current: CloudFile): List<CloudFile> {
+    val previewable = previewableFiles(files)
+    val currentIndex = previewable.indexOfFirst { it.path == current.path }
     if (currentIndex < 0) return emptyList()
-    return listOfNotNull(images.getOrNull(currentIndex - 1), images.getOrNull(currentIndex + 1))
+    return listOfNotNull(previewable.getOrNull(currentIndex - 1), previewable.getOrNull(currentIndex + 1))
 }
 
 internal fun foldersToPrefetch(files: List<CloudFile>): List<String> = files
