@@ -104,19 +104,24 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.account != null) {
             refresh()
         } else {
-            store.loadPendingLogin()?.let { session ->
+            store.loadPendingLogin()?.let { pendingLogin ->
                 _state.update { it.copy(loginWaiting = true) }
-                pollLogin(session)
+                pollLogin(pendingLogin)
             }
         }
     }
 
     fun startBrowserLogin(server: String) {
-        store.loadPendingLogin()?.let { session ->
+        store.loadPendingLogin()?.let { pendingLogin ->
             _state.update {
-                it.copy(loading = false, loginWaiting = true, loginUrl = session.loginUrl, error = null)
+                it.copy(
+                    loading = false,
+                    loginWaiting = true,
+                    loginUrl = pendingLogin.session.loginUrl,
+                    error = null,
+                )
             }
-            pollLogin(session)
+            pollLogin(pendingLogin)
             return
         }
         val serverUrl = NextcloudPath.normalizeServerUrl(server)
@@ -132,22 +137,25 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update { it.copy(loading = false, loginWaiting = false, error = failure.userMessage()) }
                 }
                 .onSuccess { session ->
-                    store.savePendingLogin(session)
+                    val pendingLogin = store.savePendingLogin(session)
                     _state.update { it.copy(loading = false, loginWaiting = true, loginUrl = session.loginUrl) }
-                    pollLoginLoop(session)
+                    pollLoginLoop(pendingLogin)
                 }
         }
     }
 
-    private fun pollLogin(session: ch.niels.goodnextcloud.data.LoginFlowSession) {
+    private fun pollLogin(pendingLogin: ch.niels.goodnextcloud.data.PendingLogin) {
         loginJob?.cancel()
-        loginJob = viewModelScope.launch { pollLoginLoop(session) }
+        loginJob = viewModelScope.launch { pollLoginLoop(pendingLogin) }
     }
 
-    private suspend fun pollLoginLoop(session: ch.niels.goodnextcloud.data.LoginFlowSession) {
-        repeat(1_200) {
+    private suspend fun pollLoginLoop(pendingLogin: ch.niels.goodnextcloud.data.PendingLogin) {
+        while (System.currentTimeMillis() < pendingLogin.expiresAtMillis) {
             delay(1_000)
-            val result = runCatching { withContext(Dispatchers.IO) { client.pollLogin(session) } }
+            if (System.currentTimeMillis() >= pendingLogin.expiresAtMillis) break
+            val result = runCatching {
+                withContext(Dispatchers.IO) { client.pollLogin(pendingLogin.session) }
+            }
             val account = result.getOrNull()
             if (account != null) {
                 store.save(account)

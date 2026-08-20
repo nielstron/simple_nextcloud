@@ -10,7 +10,20 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-class AccountStore(context: Context) {
+internal const val LOGIN_FLOW_LIFETIME_MILLIS = 20 * 60 * 1_000L
+
+internal fun isLoginFlowExpired(createdAtMillis: Long, nowMillis: Long): Boolean =
+    nowMillis - createdAtMillis >= LOGIN_FLOW_LIFETIME_MILLIS
+
+data class PendingLogin(
+    val session: LoginFlowSession,
+    val expiresAtMillis: Long,
+)
+
+class AccountStore(
+    context: Context,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+) {
     private val preferences = context.getSharedPreferences("account", Context.MODE_PRIVATE)
     private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
@@ -31,19 +44,30 @@ class AccountStore(context: Context) {
 
     fun clear() = preferences.edit().clear().apply()
 
-    fun savePendingLogin(session: LoginFlowSession) {
+    fun savePendingLogin(session: LoginFlowSession): PendingLogin {
+        val createdAtMillis = nowMillis()
         preferences.edit()
             .putString("login_url", encrypt(session.loginUrl))
             .putString("poll_endpoint", encrypt(session.pollEndpoint))
             .putString("poll_token", encrypt(session.token))
+            .putLong("login_created_at", createdAtMillis)
             .apply()
+        return PendingLogin(session, createdAtMillis + LOGIN_FLOW_LIFETIME_MILLIS)
     }
 
-    fun loadPendingLogin(): LoginFlowSession? {
+    fun loadPendingLogin(): PendingLogin? {
+        val createdAtMillis = preferences.getLong("login_created_at", 0L)
+        if (createdAtMillis == 0L || isLoginFlowExpired(createdAtMillis, nowMillis())) {
+            clearPendingLogin()
+            return null
+        }
         val loginUrl = preferences.getString("login_url", null)?.let(::decrypt) ?: return null
         val endpoint = preferences.getString("poll_endpoint", null)?.let(::decrypt) ?: return null
         val token = preferences.getString("poll_token", null)?.let(::decrypt) ?: return null
-        return LoginFlowSession(loginUrl, endpoint, token)
+        return PendingLogin(
+            LoginFlowSession(loginUrl, endpoint, token),
+            createdAtMillis + LOGIN_FLOW_LIFETIME_MILLIS,
+        )
     }
 
     fun clearPendingLogin() {
@@ -51,6 +75,7 @@ class AccountStore(context: Context) {
             .remove("login_url")
             .remove("poll_endpoint")
             .remove("poll_token")
+            .remove("login_created_at")
             .apply()
     }
 

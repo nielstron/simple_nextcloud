@@ -13,6 +13,7 @@ import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
@@ -187,7 +188,10 @@ private fun LoginScreen(
     val context = LocalContext.current
     LaunchedEffect(loginUrl) {
         loginUrl?.let { url ->
-            context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+            CustomTabsIntent.Builder()
+                .setShowTitle(true)
+                .build()
+                .launchUrl(context, android.net.Uri.parse(url))
             onLoginUrlOpened()
         }
     }
