@@ -205,7 +205,7 @@ private fun decodeFiles(files: JSONArray): List<CloudFile> = files.objects().map
     )
 }
 
-private fun Account.cacheIdentity(): String = MessageDigest.getInstance("SHA-256")
+internal fun Account.cacheIdentity(): String = MessageDigest.getInstance("SHA-256")
     .digest("${NextcloudPath.normalizeServerUrl(serverUrl)}\u0000$username".toByteArray())
     .joinToString("") { "%02x".format(it) }
 

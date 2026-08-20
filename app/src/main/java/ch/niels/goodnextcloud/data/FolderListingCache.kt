@@ -10,7 +10,6 @@ package ch.niels.goodnextcloud.data
 class FolderListingCache(
     private val maxEntries: Int = Int.MAX_VALUE,
     private val maxStorageBytes: Long = DEFAULT_MAX_STORAGE_BYTES,
-    private val freshForMillis: Long = 2 * 60 * 1_000,
     private val clock: () -> Long = System::currentTimeMillis,
     private val store: FolderListingStore = FolderListingStore.None,
     private val entrySize: (String, Entry, Usage) -> Long = { path, entry, usage ->
@@ -56,15 +55,6 @@ class FolderListingCache(
     }
 
     @Synchronized
-    fun isFresh(path: String): Boolean = entries.entries
-        .firstOrNull { it.key == normalize(path) }
-        ?.value
-        ?.let { clock() - it.fetchedAt < freshForMillis } == true
-
-    @Synchronized
-    fun paths(): Set<String> = entries.keys.toSet()
-
-    @Synchronized
     fun remove(path: String) {
         val normalizedPath = normalize(path)
         entries.remove(normalizedPath)
@@ -88,18 +78,6 @@ class FolderListingCache(
             trimToLimits()
         }
     }
-
-    /** Ranks known folders by visit frequency, breaking ties by recency. */
-    @Synchronized
-    fun preferred(paths: Collection<String>, limit: Int): List<String> = paths
-        .map(::normalize)
-        .distinct()
-        .filterNot(::isFresh)
-        .sortedWith(
-            compareByDescending<String> { visits[it]?.count ?: 0 }
-                .thenByDescending { visits[it]?.lastVisitedAt ?: 0 },
-        )
-        .take(limit)
 
     @Synchronized
     fun clear() {

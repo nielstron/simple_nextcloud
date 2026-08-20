@@ -15,19 +15,23 @@ import ch.niels.goodnextcloud.data.CloudFile
 import ch.niels.goodnextcloud.data.ExistingShare
 import ch.niels.goodnextcloud.data.FolderListingCache
 import ch.niels.goodnextcloud.data.LinkShareOptions
+import ch.niels.goodnextcloud.data.ImagePreviewCache
 import ch.niels.goodnextcloud.data.NextcloudClient
 import ch.niels.goodnextcloud.data.NextcloudPath
 import ch.niels.goodnextcloud.data.ShareUser
 import ch.niels.goodnextcloud.data.ShareHistoryStore
 import ch.niels.goodnextcloud.data.persistentFolderListingCache
 import ch.niels.goodnextcloud.data.ShareUpdate
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -83,11 +87,12 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var folderCache = initialAccount?.let {
         persistentFolderListingCache(application, it)
     } ?: FolderListingCache()
+    private var imagePreviewCache = initialAccount?.let { ImagePreviewCache.forAccount(application, it) }
     private var navigationJob: Job? = null
     private var prefetchJob: Job? = null
-    private var prefetchTarget: String? = null
     private var shareUserSearchJob: Job? = null
     private var previewJob: Job? = null
+    private var imagePrefetches: List<ImagePrefetch> = emptyList()
     private var uploadWorkerJob: Job? = null
     private var loginJob: Job? = null
     private var nextUploadId = 1L
@@ -164,6 +169,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun finishLogin(account: Account) {
         folderCache = persistentFolderListingCache(getApplication(), account)
+        imagePreviewCache = ImagePreviewCache.forAccount(getApplication(), account)
         _state.update { it.copy(loading = true, loginWaiting = false, error = null) }
         runCatching { withContext(Dispatchers.IO) { client.list(account, "") } }
                 .onSuccess { files ->
@@ -190,10 +196,12 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         loginJob?.cancel()
         navigationJob?.cancel()
         prefetchJob?.cancel()
+        imagePrefetches.forEach { it.bytes.cancel() }
         uploadWorkerJob?.cancel()
         uploadJobs.clear()
-        prefetchTarget = null
         folderCache.clear()
+        imagePreviewCache?.clear()
+        imagePreviewCache = null
         store.clear()
         notifyDocumentRoots()
         _state.value = FileUiState()
@@ -218,18 +226,14 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(highlightedPath = child) }
     }
 
-    fun loadPath(path: String, forceRefresh: Boolean = false) {
+    fun loadPath(path: String) {
         val account = _state.value.account ?: return
         val normalizedPath = path.trim('/')
+        prefetchJob?.cancel()
         val previousPath = _state.value.path
         val previousFiles = _state.value.files
         val cached = folderCache.get(normalizedPath)
         if (cached == null) folderCache.recordVisit(normalizedPath)
-        val adoptsPrefetch = !forceRefresh && prefetchJob?.isActive == true && prefetchTarget == normalizedPath
-        if (!adoptsPrefetch) {
-            prefetchJob?.cancel()
-            prefetchTarget = null
-        }
         _state.update {
             it.copy(
                 path = normalizedPath,
@@ -238,10 +242,8 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 error = null,
             )
         }
+        cached?.let { schedulePrefetch(account, it.files) }
         navigationJob?.cancel()
-        // The speculative request already fetches exactly this listing. Let it become foreground work
-        // instead of cancelling it and sending a duplicate PROPFIND.
-        if (adoptsPrefetch) return
         navigationJob = viewModelScope.launch {
             runCatching { client.listCancellable(account, normalizedPath) }
                 .onSuccess { files ->
@@ -249,7 +251,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                     folderCache.put(normalizedPath, sorted)
                     if (_state.value.path == normalizedPath) {
                         _state.update { it.copy(files = sorted, loading = false) }
-                        schedulePrefetch(account, sorted)
+                        if (cached?.files != sorted) schedulePrefetch(account, sorted)
                     }
                 }
                 .onFailure { failure ->
@@ -267,7 +269,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun refresh() = loadPath(_state.value.path, forceRefresh = true)
+    fun refresh() = loadPath(_state.value.path)
 
     fun enqueueFiles(resolver: ContentResolver, uris: List<Uri>) {
         val targetFolder = _state.value.path
@@ -516,14 +518,35 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     fun showPreview(file: CloudFile) {
         val account = _state.value.account ?: return
         previewJob?.cancel()
+        val adoptedPrefetch = imagePrefetches
+            .firstOrNull { it.file.samePreviewVersion(file) }
+            ?.bytes
+        if (adoptedPrefetch == null) {
+            imagePrefetches.forEach { it.bytes.cancel() }
+            imagePrefetches = emptyList()
+        }
         _state.update {
             it.copy(previewFile = file, previewBytes = null, previewLoading = true, previewError = null)
         }
         previewJob = viewModelScope.launch {
-            runCatching { withContext(Dispatchers.IO) { client.preview(account, file) } }
+            runCatching {
+                if (adoptedPrefetch != null) {
+                    val bytes = adoptedPrefetch.await()
+                    withContext(Dispatchers.IO) {
+                        imagePreviewCache?.get(file) ?: bytes.also { imagePreviewCache?.put(file, it) }
+                    }
+                } else {
+                    withContext(Dispatchers.IO) {
+                        imagePreviewCache?.get(file) ?: client.preview(account, file).also { bytes ->
+                            imagePreviewCache?.put(file, bytes)
+                        }
+                    }
+                }
+            }
                 .onSuccess { bytes ->
                     if (_state.value.previewFile?.path == file.path) {
                         _state.update { it.copy(previewBytes = bytes, previewLoading = false) }
+                        prefetchAdjacentImages(account, file)
                     }
                 }
                 .onFailure { failure ->
@@ -536,8 +559,26 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closePreview() {
         previewJob?.cancel()
+        imagePrefetches.forEach { it.bytes.cancel() }
+        imagePrefetches = emptyList()
         _state.update {
             it.copy(previewFile = null, previewBytes = null, previewLoading = false, previewError = null)
+        }
+    }
+
+    private fun prefetchAdjacentImages(account: Account, current: CloudFile) {
+        val targets = adjacentImages(_state.value.files, current)
+        imagePrefetches
+            .filterNot { existing -> targets.any(existing.file::samePreviewVersion) }
+            .forEach { it.bytes.cancel() }
+        imagePrefetches = targets.map { target ->
+            imagePrefetches.firstOrNull { it.file.samePreviewVersion(target) }
+                ?: ImagePrefetch(
+                    target,
+                    viewModelScope.async(Dispatchers.IO) {
+                        imagePreviewCache?.peek(target) ?: client.preview(account, target)
+                    },
+                )
         }
     }
 
@@ -690,43 +731,23 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Immediately prefetches at most two likely directory listings, one at a time. Navigating to the
-     * active target adopts that request; navigating anywhere else cancels it. Only PROPFIND metadata
-     * is fetched—this code never requests file bodies.
-     */
+    /** Fetches every child directory listing concurrently. Only PROPFIND metadata is requested. */
     private fun schedulePrefetch(account: Account, visibleFiles: List<CloudFile>) {
         prefetchJob?.cancel()
-        val candidates = folderCache.paths() + visibleFiles.filter(CloudFile::isFolder).map(CloudFile::path)
+        val folders = foldersToPrefetch(visibleFiles)
         prefetchJob = viewModelScope.launch {
-            if (_state.value.loading) return@launch
-            folderCache.preferred(candidates, PREFETCH_FOLDER_LIMIT).forEach { folderPath ->
-                prefetchTarget = folderPath
-                runCatching { client.listCancellable(account, folderPath) }
-                    .onSuccess { files ->
-                        val sorted = files.sortedFiles()
-                        folderCache.put(folderPath, sorted)
-                        if (_state.value.path == folderPath) {
-                            _state.update { it.copy(files = sorted, loading = false) }
-                            prefetchTarget = null
-                            schedulePrefetch(account, sorted)
-                            return@launch
-                        }
+            coroutineScope {
+                folders.forEach { folderPath ->
+                    launch {
+                        runCatching { client.listCancellable(account, folderPath) }
+                            .onSuccess { files -> folderCache.put(folderPath, files.sortedFiles()) }
                     }
-                    .onFailure { failure ->
-                        if (_state.value.path == folderPath) {
-                            prefetchTarget = null
-                            _state.update { it.copy(loading = false, error = failure.userMessage()) }
-                            return@launch
-                        }
-                    }
+                }
             }
-            prefetchTarget = null
         }
     }
 
     private companion object {
-        const val PREFETCH_FOLDER_LIMIT = 2
         const val USER_SEARCH_DEBOUNCE_MILLIS = 250L
     }
 }
@@ -735,7 +756,22 @@ private fun List<CloudFile>.sortedFiles() = sortedWith(compareByDescending<Cloud
 private fun Throwable.userMessage() = message ?: "Something went wrong"
 
 private data class UploadJob(val item: UploadQueueItem, val source: UploadSource)
+private data class ImagePrefetch(val file: CloudFile, val bytes: Deferred<ByteArray>)
 private sealed interface UploadSource {
     data class File(val uri: Uri, val size: Long, val mimeType: String?) : UploadSource
     data class Folder(val uri: Uri) : UploadSource
 }
+
+internal fun adjacentImages(files: List<CloudFile>, current: CloudFile): List<CloudFile> {
+    val images = files.filter { it.mimeType?.startsWith("image/") == true }
+    val currentIndex = images.indexOfFirst { it.path == current.path }
+    if (currentIndex < 0) return emptyList()
+    return listOfNotNull(images.getOrNull(currentIndex - 1), images.getOrNull(currentIndex + 1))
+}
+
+internal fun foldersToPrefetch(files: List<CloudFile>): List<String> = files
+    .filter(CloudFile::isFolder)
+    .map(CloudFile::path)
+    .distinct()
+
+private fun CloudFile.samePreviewVersion(other: CloudFile) = path == other.path && etag == other.etag

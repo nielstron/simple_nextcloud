@@ -1,9 +1,7 @@
 package ch.niels.goodnextcloud.data
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FolderListingCacheTest {
@@ -11,16 +9,13 @@ class FolderListingCacheTest {
     private val file = CloudFile("Work", "Work", true, 0, null, null, null)
 
     @Test
-    fun `stores copied metadata and expires freshness`() {
+    fun `stores copied metadata`() {
         val source = mutableListOf(file)
-        val cache = FolderListingCache(freshForMillis = 100, clock = { now })
+        val cache = FolderListingCache(clock = { now })
         cache.put("/", source)
         source.clear()
 
         assertEquals(listOf(file), cache.get("")?.files)
-        assertTrue(cache.isFresh("/"))
-        now += 101
-        assertFalse(cache.isFresh(""))
     }
 
     @Test
@@ -33,20 +28,6 @@ class FolderListingCacheTest {
 
         assertNull(cache.get("two"))
         assertEquals(listOf(file), cache.get("one")?.files)
-    }
-
-    @Test
-    fun `prefers frequently visited stale folders`() {
-        val cache = FolderListingCache(freshForMillis = 10, clock = { now })
-        cache.put("frequent", listOf(file))
-        cache.put("recent", listOf(file))
-        cache.recordVisit("frequent")
-        cache.recordVisit("frequent")
-        now += 1
-        cache.recordVisit("recent")
-        now += 11
-
-        assertEquals(listOf("frequent", "recent"), cache.preferred(listOf("recent", "frequent"), 2))
     }
 
     @Test
