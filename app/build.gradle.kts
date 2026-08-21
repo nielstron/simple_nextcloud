@@ -20,8 +20,8 @@ android {
         applicationId = "de.nielstron.simplenextcloud"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.0.1"
+        versionCode = 5
+        versionName = "1.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

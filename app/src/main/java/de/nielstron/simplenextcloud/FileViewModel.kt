@@ -115,6 +115,10 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         beginBrowserLogin(server)
     }
 
+    fun localNetworkPermissionDenied() {
+        _state.update { it.copy(error = "Allow local-network access to connect to this Nextcloud server") }
+    }
+
     fun restartBrowserLogin() {
         val pendingLogin = store.loadPendingLogin()
         if (pendingLogin == null) {

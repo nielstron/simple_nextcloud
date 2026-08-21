@@ -155,6 +155,7 @@ fun SimpleNextcloudApp(
     model: FileViewModel,
     sharedUris: List<android.net.Uri> = emptyList(),
     onSharedUrisConsumed: () -> Unit = {},
+    onStartBrowserLogin: (String) -> Unit = model::startBrowserLogin,
     onOpenLoginUrl: (String) -> Unit,
 ) {
     if (state.account == null) {
@@ -163,7 +164,7 @@ fun SimpleNextcloudApp(
             waiting = state.loginWaiting,
             error = state.error,
             loginUrl = state.loginUrl,
-            onConnect = model::startBrowserLogin,
+            onConnect = onStartBrowserLogin,
             onRestart = model::restartBrowserLogin,
             onLoginUrlOpened = model::consumeLoginUrl,
             onOpenLoginUrl = onOpenLoginUrl,
