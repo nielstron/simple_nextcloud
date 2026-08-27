@@ -1,0 +1,1 @@
+Support Android 17's local-network permission when connecting to a Nextcloud server on the local network.

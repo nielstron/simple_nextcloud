@@ -1,0 +1,46 @@
+Categories:
+  - Cloud Storage & File Sync
+  - File Manager
+License: MIT
+AuthorName: Niels Mündler-Sasahara
+AuthorWebSite: https://github.com/nielstron
+SourceCode: https://github.com/nielstron/simple_nextcloud
+IssueTracker: https://github.com/nielstron/simple_nextcloud/issues
+Changelog: https://github.com/nielstron/simple_nextcloud/releases
+
+Summary: A small Nextcloud file browser without a duplicate upload cache
+Description: |-
+  Simple Nextcloud is a deliberately small client for accessing files on your
+  own Nextcloud server.
+
+  Features:
+
+  * Browse folders and view images.
+  * Upload and download files or complete folders.
+  * Move, copy, rename, create, and delete files and folders.
+  * Share files with Nextcloud users or create public links.
+  * Send files to Nextcloud from Android's share sheet.
+  * Use Nextcloud as a storage provider in Android's system file picker.
+
+  Unlike the official Nextcloud client, Simple Nextcloud does not keep a second,
+  hidden copy of every uploaded file. It only caches folder metadata and image
+  previews to make browsing more responsive.
+
+  The app connects directly to the Nextcloud server you configure. It contains
+  no advertising, analytics, or tracking.
+
+RepoType: git
+Repo: https://github.com/nielstron/simple_nextcloud.git
+
+Builds:
+  - versionName: 1.0.2
+    versionCode: 5
+    commit: 6529966e25198e21d41e674c70cb2092a11ce11e
+    subdir: app
+    gradle:
+      - yes
+
+AutoUpdateMode: Version v%v
+UpdateCheckMode: Tags ^v[0-9]+\.[0-9]+\.[0-9]+$
+CurrentVersion: 1.0.2
+CurrentVersionCode: 5
