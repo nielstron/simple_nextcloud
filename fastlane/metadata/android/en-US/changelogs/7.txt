@@ -1,0 +1,1 @@
+Remove Android's embedded dependency metadata for F-Droid compatibility.
