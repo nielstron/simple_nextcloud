@@ -5,7 +5,7 @@ the title, descriptions, changelog, icon, feature graphic, and screenshots from
 there when it builds the app.
 
 The file `fdroid/de.nielstron.simplenextcloud.yml` is a ready-to-copy build
-recipe for the F-Droid Data repository. It targets the published `v1.0.3` tag by
+recipe for the F-Droid Data repository. It targets the published `v1.0.4` tag by
 its full commit hash, verifies the reproducible upstream APK, and enables
 tag-based automatic updates. The tagged source contains all listing text and
 graphics in its Fastlane metadata.
