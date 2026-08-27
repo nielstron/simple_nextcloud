@@ -1,0 +1,1 @@
+Add the complete F-Droid store listing and reproducible release metadata.

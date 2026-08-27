@@ -2,8 +2,8 @@ name: Release APK
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -29,44 +29,58 @@ jobs:
           echo "version=$app_version" >> "$GITHUB_OUTPUT"
           echo "tag=v$app_version" >> "$GITHUB_OUTPUT"
 
-      - name: Check for existing release
-        id: release
+      - name: Verify release tag
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          EXPECTED_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          test "$GITHUB_REF_NAME" = "$EXPECTED_TAG"
 
       - name: Set up Java
-        if: steps.release.outputs.exists == 'false'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
 
+      - name: Configure release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          {
+            printf 'storeFile=%s\n' "$RUNNER_TEMP/release.jks"
+            printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+          } > keystore.properties
+
       - name: Test and build APK
-        if: steps.release.outputs.exists == 'false'
-        run: ./gradlew test assembleDebug --no-daemon
+        run: ./gradlew test assembleRelease --no-daemon
+
+      - name: Verify APK signature
+        run: |
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          test -n "$apksigner"
+          "$apksigner" verify --verbose app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare release asset
-        if: steps.release.outputs.exists == 'false'
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-        run: cp app/build/outputs/apk/debug/app-debug.apk "simple-nextcloud-$APP_VERSION.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "simple-nextcloud-$APP_VERSION.apk"
 
       - name: Create GitHub release
-        if: steps.release.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           APP_VERSION: ${{ steps.version.outputs.version }}
         run: |
           gh release create "$RELEASE_TAG" "simple-nextcloud-$APP_VERSION.apk" \
-            --target "$GITHUB_SHA" \
             --title "Simple Nextcloud $APP_VERSION" \
             --generate-notes

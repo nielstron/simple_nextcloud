@@ -20,8 +20,8 @@ android {
         applicationId = "de.nielstron.simplenextcloud"
         minSdk = 26
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.0.2"
+        versionCode = 6
+        versionName = "1.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -39,6 +39,9 @@ android {
 
     buildTypes {
         getByName("release") {
+            vcsInfo {
+                include = false
+            }
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
