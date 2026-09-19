@@ -1,15 +1,24 @@
-name: Release APK
+name: Release Android artifacts
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to rebuild
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -19,6 +28,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Read app version
         id: version
@@ -33,7 +44,7 @@ jobs:
         env:
           EXPECTED_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          test "$GITHUB_REF_NAME" = "$EXPECTED_TAG"
+          test "$RELEASE_TAG" = "$EXPECTED_TAG"
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -61,26 +72,34 @@ jobs:
             printf 'keyPassword=%s\n' "$KEY_PASSWORD"
           } > keystore.properties
 
-      - name: Test and build APK
-        run: ./gradlew test assembleRelease --no-daemon
+      - name: Test and build release artifacts
+        run: ./gradlew test assembleRelease bundleRelease --no-daemon
 
-      - name: Verify APK signature
+      - name: Verify release signatures
         run: |
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
           test -n "$apksigner"
           "$apksigner" verify --verbose app/build/outputs/apk/release/app-release.apk
+          jarsigner -verify app/build/outputs/bundle/release/app-release.aab
 
-      - name: Prepare release asset
+      - name: Prepare release assets
         env:
-          APP_VERSION: ${{ steps.version.outputs.version }}
-        run: cp app/build/outputs/apk/release/app-release.apk "simple-nextcloud-$APP_VERSION.apk"
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
           APP_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$RELEASE_TAG" "simple-nextcloud-$APP_VERSION.apk" \
-            --title "Simple Nextcloud $APP_VERSION" \
-            --generate-notes
+          cp app/build/outputs/apk/release/app-release.apk "simple-nextcloud-$APP_VERSION.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "simple-nextcloud-$APP_VERSION.aab"
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "simple-nextcloud-$APP_VERSION.aab" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              "simple-nextcloud-$APP_VERSION.apk" \
+              "simple-nextcloud-$APP_VERSION.aab" \
+              --title "Simple Nextcloud $APP_VERSION" \
+              --generate-notes
+          fi
