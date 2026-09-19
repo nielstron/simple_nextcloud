@@ -415,7 +415,8 @@ class NextcloudClient(
         val meta = root.getJSONObject("meta")
         val ocsCode = meta.getInt("statuscode")
         if (httpCode !in 200..299 || ocsCode !in setOf(100, 200)) {
-            throw NextcloudException(httpCode, meta.optString("message", httpMessage))
+            val effectiveCode = if (httpCode in 200..299) ocsCode else httpCode
+            throw NextcloudException(effectiveCode, meta.optString("message", httpMessage))
         }
         return root
     }
@@ -502,5 +503,5 @@ class NextcloudClient(
     }
 }
 
-class NextcloudException(val statusCode: Int, message: String) :
-    Exception("Nextcloud returned $statusCode: $message")
+class NextcloudException(val statusCode: Int, val serverMessage: String) :
+    Exception("Nextcloud returned $statusCode: $serverMessage")

@@ -16,7 +16,7 @@ class RenameFailureMessageTest {
     @Test
     fun `preserves other server errors`() {
         assertEquals(
-            "Nextcloud returned 500: Internal Server Error",
+            "Nextcloud had a server problem (HTTP 500). Try again later.",
             renameFailureMessage("report.pdf", NextcloudException(500, "Internal Server Error")),
         )
     }

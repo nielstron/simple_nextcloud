@@ -17,6 +17,7 @@ import de.nielstron.simplenextcloud.data.FolderListingCache
 import de.nielstron.simplenextcloud.data.LinkShareOptions
 import de.nielstron.simplenextcloud.data.ImagePreviewCache
 import de.nielstron.simplenextcloud.data.NextcloudClient
+import de.nielstron.simplenextcloud.data.NextcloudException
 import de.nielstron.simplenextcloud.data.NextcloudPath
 import de.nielstron.simplenextcloud.data.ShareUser
 import de.nielstron.simplenextcloud.data.ShareHistoryStore
@@ -826,10 +827,33 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 private fun List<CloudFile>.sortedFiles() = sortedWith(compareByDescending<CloudFile> { it.isFolder }.thenBy { it.name.lowercase() })
-private fun Throwable.userMessage() = message ?: "Something went wrong"
+internal fun Throwable.userMessage(): String = when (this) {
+    is NextcloudException -> when (statusCode) {
+        400 -> specificServerMessage("Nextcloud rejected the request. Check the entered values and try again.")
+        401 -> "Nextcloud rejected the saved login. Disconnect and log in again."
+        403 -> specificServerMessage("You do not have permission to do that.")
+        404 -> "The file or folder no longer exists. Refresh the folder and try again."
+        405 -> "This operation is not supported here. A file or folder with that name may already exist."
+        409 -> "The operation conflicts with the current folder state. Refresh it and try again."
+        412 -> "A file or folder with that name already exists. Choose a different name."
+        413 -> "The file is larger than this Nextcloud server allows."
+        423 -> "The file or folder is locked by another operation. Try again shortly."
+        429 -> "Nextcloud received too many requests. Wait a moment and try again."
+        507 -> "Nextcloud does not have enough free storage for this operation."
+        in 500..599 -> "Nextcloud had a server problem (HTTP $statusCode). Try again later."
+        else -> message ?: "Nextcloud rejected the request (HTTP $statusCode)."
+    }
+    else -> message ?: "Something went wrong"
+}
+
+private fun NextcloudException.specificServerMessage(fallback: String): String =
+    serverMessage.takeUnless {
+        it.equals("Bad Request", ignoreCase = true) ||
+            it.equals("Forbidden", ignoreCase = true)
+    } ?: fallback
 
 internal fun renameFailureMessage(newName: String, failure: Throwable): String =
-    if (failure is de.nielstron.simplenextcloud.data.NextcloudException && failure.statusCode == 412) {
+    if (failure is NextcloudException && failure.statusCode == 412) {
         "A file or folder named “$newName” already exists here. Choose a different name."
     } else {
         failure.userMessage()
