@@ -60,6 +60,7 @@ import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderShared
 import androidx.compose.material.icons.outlined.Image
@@ -328,12 +329,12 @@ private fun FilesScreen(
     }
 
     BackHandler(enabled = sharedUris.isEmpty() && state.path.isNotEmpty(), onBack = model::up)
-    LaunchedEffect(state.error, state.message, state.shareUrl, state.downloadedUri) {
+    LaunchedEffect(state.message, state.shareUrl, state.downloadedUri) {
         state.shareUrl?.let { url ->
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(ClipData.newPlainText("Nextcloud share link", url))
         }
-        (state.error ?: state.message)?.let { notice ->
+        state.message?.let { notice ->
             val result = snackbar.showSnackbar(
                 message = notice,
                 actionLabel = if (state.downloadedUri != null) "Open" else null,
@@ -346,7 +347,7 @@ private fun FilesScreen(
                         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
                 )
             }
-            model.clearNotice()
+            model.clearSuccessNotice()
         }
     }
     LaunchedEffect(state.localOpenUri) {
@@ -727,6 +728,17 @@ private fun FilesScreen(
                 uploadQueueOpen = false
                 model.navigateToUpload(item)
             },
+        )
+    }
+
+    // Keep errors above every other full-screen dialog, including the image preview and sharing.
+    state.error?.let { error ->
+        AlertDialog(
+            onDismissRequest = {},
+            icon = { Icon(Icons.Outlined.ErrorOutline, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Nextcloud error") },
+            text = { Text(error) },
+            confirmButton = { Button(onClick = model::clearError) { Text("OK") } },
         )
     }
 }

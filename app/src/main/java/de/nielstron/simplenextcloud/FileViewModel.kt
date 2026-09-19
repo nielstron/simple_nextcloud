@@ -32,6 +32,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -96,6 +98,8 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var uploadWorkerJob: Job? = null
     private var loginJob: Job? = null
     private var nextUploadId = 1L
+    private val mutationMutex = Mutex()
+    private var pendingMutationCount = 0
     private val uploadJobs = ArrayDeque<UploadJob>()
     private val _state = MutableStateFlow(FileUiState(account = initialAccount))
     val state = _state.asStateFlow()
@@ -625,9 +629,10 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         client.delete(account, file)
     }
 
-    fun rename(file: CloudFile, newName: String) = mutateAndRefresh("Renamed to $newName") { account ->
-        client.rename(account, file, newName)
-    }
+    fun rename(file: CloudFile, newName: String) = mutateAndRefresh(
+        message = "Renamed to $newName",
+        failureMessage = { renameFailureMessage(newName, it) },
+    ) { account -> client.rename(account, file, newName) }
 
     fun createFolder(name: String) {
         val trimmed = name.trim()
@@ -671,35 +676,51 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    fun clearError() = _state.update { it.copy(error = null) }
+
+    fun clearSuccessNotice() = _state.update {
+        it.copy(
+            message = null,
+            shareUrl = null,
+            downloadedUri = null,
+            downloadedMimeType = null,
+        )
+    }
+
     private fun mutateAndRefresh(
         message: String,
         onSuccess: () -> Unit = {},
+        failureMessage: (Throwable) -> String = Throwable::userMessage,
         mutation: (Account) -> Unit,
     ) {
         val account = _state.value.account ?: return
         val currentPath = _state.value.path
-        _state.update { it.copy(loading = true, error = null) }
+        pendingMutationCount += 1
+        _state.update { it.copy(loading = true) }
         viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    mutation(account)
-                    client.list(account, currentPath)
+            mutationMutex.withLock {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        mutation(account)
+                        client.list(account, currentPath)
+                    }
+                }.onSuccess { files ->
+                    val sorted = files.sortedFiles()
+                    folderCache.put(currentPath, sorted)
+                    _state.update {
+                        it.copy(
+                            files = if (it.path == currentPath) sorted else it.files,
+                            message = message,
+                        )
+                    }
+                    onSuccess()
+                    schedulePrefetch(account, sorted)
+                }.onFailure { failure ->
+                    _state.update { it.copy(error = failureMessage(failure)) }
                 }
-            }.onSuccess { files ->
-                val sorted = files.sortedFiles()
-                folderCache.put(currentPath, sorted)
-                _state.update {
-                    it.copy(
-                        files = if (it.path == currentPath) sorted else it.files,
-                        loading = false,
-                        message = message,
-                    )
-                }
-                onSuccess()
-                schedulePrefetch(account, sorted)
-            }.onFailure { failure ->
-                _state.update { it.copy(loading = false, error = failure.userMessage()) }
             }
+            pendingMutationCount -= 1
+            _state.update { it.copy(loading = pendingMutationCount > 0) }
         }
     }
 
@@ -793,6 +814,13 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
 private fun List<CloudFile>.sortedFiles() = sortedWith(compareByDescending<CloudFile> { it.isFolder }.thenBy { it.name.lowercase() })
 private fun Throwable.userMessage() = message ?: "Something went wrong"
+
+internal fun renameFailureMessage(newName: String, failure: Throwable): String =
+    if (failure is de.nielstron.simplenextcloud.data.NextcloudException && failure.statusCode == 412) {
+        "A file or folder named “$newName” already exists here. Choose a different name."
+    } else {
+        failure.userMessage()
+    }
 
 private data class UploadJob(val item: UploadQueueItem, val source: UploadSource)
 private data class ImagePrefetch(val file: CloudFile, val bytes: Deferred<ByteArray>)
