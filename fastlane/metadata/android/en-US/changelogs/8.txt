@@ -1,0 +1,1 @@
+Show server failures in a clear confirmation dialog, explain rename conflicts, make repeated renames reliable, and add file actions to the image preview.
