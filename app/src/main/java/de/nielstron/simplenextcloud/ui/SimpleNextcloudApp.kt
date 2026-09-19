@@ -631,9 +631,12 @@ private fun FilesScreen(
             error = state.previewError,
             onSelect = model::showPreview,
             onDismiss = model::closePreview,
+            onDelete = { deleteTarget = file },
+            onCopy = { model.stageTransfer(file, ClipboardMode.COPY) },
+            onMove = { model.stageTransfer(file, ClipboardMode.MOVE) },
+            onRename = { renameTarget = file },
             onShare = { sharing = file },
             onDownload = {
-                model.closePreview()
                 pendingDownload = file
                 downloadLauncher.launch(file.name)
             },
@@ -1012,12 +1015,17 @@ private fun FullScreenImagePreview(
     error: String?,
     onSelect: (CloudFile) -> Unit,
     onDismiss: () -> Unit,
+    onDelete: () -> Unit,
+    onCopy: () -> Unit,
+    onMove: () -> Unit,
+    onRename: () -> Unit,
     onShare: () -> Unit,
     onDownload: () -> Unit,
 ) {
     val initialPage = files.indexOfFirst { it.path == currentFile.path }.coerceAtLeast(0)
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { files.size })
     var zoomedPath by remember { mutableStateOf<String?>(null) }
+    var optionsOpen by remember { mutableStateOf(false) }
     val bitmap = remember(bytes) {
         bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
     }
@@ -1080,6 +1088,19 @@ private fun FullScreenImagePreview(
                         color = Color.White.copy(alpha = 0.72f),
                         style = MaterialTheme.typography.bodySmall,
                     )
+                }
+                Box {
+                    IconButton(onClick = { optionsOpen = true }) {
+                        Icon(Icons.Outlined.MoreVert, "File options", tint = Color.White)
+                    }
+                    DropdownMenu(expanded = optionsOpen, onDismissRequest = { optionsOpen = false }) {
+                        FileMenuItem("Delete", Icons.Outlined.Delete) { optionsOpen = false; onDelete() }
+                        FileMenuItem("Copy", Icons.Outlined.ContentCopy) { optionsOpen = false; onCopy() }
+                        FileMenuItem("Move", Icons.AutoMirrored.Outlined.DriveFileMove) { optionsOpen = false; onMove() }
+                        FileMenuItem("Rename", Icons.Outlined.Edit) { optionsOpen = false; onRename() }
+                        FileMenuItem("Share", Icons.Outlined.Share) { optionsOpen = false; onShare() }
+                        FileMenuItem("Download", Icons.Outlined.Download) { optionsOpen = false; onDownload() }
+                    }
                 }
             }
 

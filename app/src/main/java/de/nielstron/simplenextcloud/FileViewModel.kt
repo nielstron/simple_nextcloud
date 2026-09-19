@@ -625,13 +625,23 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun delete(file: CloudFile) = mutateAndRefresh("${file.name} deleted") { account ->
-        client.delete(account, file)
-    }
+    fun delete(file: CloudFile) = mutateAndRefresh(
+        message = "${file.name} deleted",
+        stateOnSuccess = { state ->
+            if (state.previewFile?.path == file.path) state.withoutPreview() else state
+        },
+    ) { account -> client.delete(account, file) }
 
     fun rename(file: CloudFile, newName: String) = mutateAndRefresh(
         message = "Renamed to $newName",
         failureMessage = { renameFailureMessage(newName, it) },
+        stateOnSuccess = { state ->
+            if (state.previewFile?.path == file.path) {
+                state.copy(previewFile = file.renamedTo(newName))
+            } else {
+                state
+            }
+        },
     ) { account -> client.rename(account, file, newName) }
 
     fun createFolder(name: String) {
@@ -691,6 +701,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         message: String,
         onSuccess: () -> Unit = {},
         failureMessage: (Throwable) -> String = Throwable::userMessage,
+        stateOnSuccess: (FileUiState) -> FileUiState = { it },
         mutation: (Account) -> Unit,
     ) {
         val account = _state.value.account ?: return
@@ -707,10 +718,12 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 }.onSuccess { files ->
                     val sorted = files.sortedFiles()
                     folderCache.put(currentPath, sorted)
-                    _state.update {
-                        it.copy(
-                            files = if (it.path == currentPath) sorted else it.files,
-                            message = message,
+                    _state.update { state ->
+                        stateOnSuccess(
+                            state.copy(
+                                files = if (state.path == currentPath) sorted else state.files,
+                                message = message,
+                            ),
                         )
                     }
                     onSuccess()
@@ -821,6 +834,18 @@ internal fun renameFailureMessage(newName: String, failure: Throwable): String =
     } else {
         failure.userMessage()
     }
+
+internal fun CloudFile.renamedTo(newName: String): CloudFile = copy(
+    name = newName,
+    path = NextcloudPath.child(path.substringBeforeLast('/', ""), newName),
+)
+
+private fun FileUiState.withoutPreview() = copy(
+    previewFile = null,
+    previewBytes = null,
+    previewLoading = false,
+    previewError = null,
+)
 
 private data class UploadJob(val item: UploadQueueItem, val source: UploadSource)
 private data class ImagePrefetch(val file: CloudFile, val bytes: Deferred<ByteArray>)
