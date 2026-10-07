@@ -3,6 +3,9 @@
 </div>
 
 <p align="center"><strong>Simple Nextcloud</strong></p>
+<div align="center"><a href="https://f-droid.org/en/packages/de.nielstron.simplenextcloud/"><img src="https://img.shields.io/f-droid/v/de.nielstron.simplenextcloud"></a></div>
+
+-----
 
 A deliberately small Android Nextcloud client for minimal usability:
 
