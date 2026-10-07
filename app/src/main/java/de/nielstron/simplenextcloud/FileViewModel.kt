@@ -37,6 +37,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.ConnectException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 
 data class FileUiState(
     val account: Account? = null,
@@ -103,6 +107,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private val mutationMutex = Mutex()
     private var pendingMutationCount = 0
     private val uploadJobs = ArrayDeque<UploadJob>()
+    private val uploadJobArchive = mutableMapOf<Long, UploadJob>()
     private val _state = MutableStateFlow(FileUiState(account = initialAccount))
     val state = _state.asStateFlow()
 
@@ -236,6 +241,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         imagePrefetches.forEach { it.bytes.cancel() }
         uploadWorkerJob?.cancel()
         uploadJobs.clear()
+        uploadJobArchive.clear()
         folderCache.clear()
         imagePreviewCache?.clear()
         imagePreviewCache = null
@@ -348,9 +354,28 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearFinishedUploads() {
+        val finishedIds = _state.value.uploadQueue
+            .filter { it.status in setOf(UploadStatus.COMPLETED, UploadStatus.FAILED) }
+            .mapTo(mutableSetOf(), UploadQueueItem::id)
+        uploadJobArchive.keys.removeAll(finishedIds)
         _state.update {
             it.copy(uploadQueue = it.uploadQueue.filter { item -> item.status in setOf(UploadStatus.QUEUED, UploadStatus.UPLOADING) })
         }
+    }
+
+    fun retryFailedUploads() {
+        val failed = _state.value.uploadQueue.filter { it.status == UploadStatus.FAILED }
+        if (failed.isEmpty()) return
+        failed.forEach { item ->
+            val original = requireNotNull(uploadJobArchive[item.id]) { "Missing upload source for ${item.name}" }
+            uploadJobs.addLast(original.copy(automaticRetries = 0, resuming = true))
+        }
+        _state.update { state ->
+            state.copy(uploadQueue = state.uploadQueue.map { item ->
+                if (item.status == UploadStatus.FAILED) item.readyForRetry() else item
+            })
+        }
+        startUploadWorker()
     }
 
     fun navigateToUpload(item: UploadQueueItem) {
@@ -789,6 +814,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun addUploadJobs(jobs: List<UploadJob>) {
         uploadJobs.addAll(jobs)
+        jobs.forEach { uploadJobArchive[it.item.id] = it }
         _state.update { it.copy(uploadQueue = it.uploadQueue + jobs.map(UploadJob::item)) }
         startUploadWorker()
     }
@@ -817,6 +843,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                                 job.item.id,
                                 requireNotNull(DocumentFile.fromTreeUri(getApplication(), source.uri)),
                                 NextcloudPath.child(job.item.targetPath, job.item.name),
+                                job.resuming,
                             )
                         }
                     }
@@ -824,7 +851,14 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                     updateUpload(job.item.id, UploadStatus.COMPLETED)
                     if (_state.value.path == job.item.targetPath) refresh()
                 }.onFailure { failure ->
-                    updateUpload(job.item.id, UploadStatus.FAILED, failure.userMessage())
+                    val nextRetry = nextAutomaticUploadRetry(job.automaticRetries, failure)
+                    if (nextRetry != null) {
+                        updateUploadItem(job.item.id, UploadQueueItem::readyForRetry)
+                        delay(1_000)
+                        uploadJobs.addFirst(job.copy(automaticRetries = nextRetry, resuming = true))
+                    } else {
+                        updateUpload(job.item.id, UploadStatus.FAILED, failure.userMessage())
+                    }
                 }
             }
         }
@@ -835,6 +869,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         id: Long,
         folder: DocumentFile,
         targetPath: String,
+        resuming: Boolean,
     ) {
         val directories = mutableListOf<String>()
         val files = mutableListOf<Pair<UploadFileProgress, UploadSource.File>>()
@@ -851,9 +886,16 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         scan(folder, "")
-        updateUploadItem(id) { it.copy(files = files.map { (progress, _) -> progress }) }
-        directories.forEach { client.createFolder(account, it) }
-        files.forEach { (progress, source) -> uploadFile(account, id, progress, source) }
+        val previous = _state.value.uploadQueue.first { it.id == id }.files.orEmpty().associateBy { it.targetPath }
+        val resumedFiles = files.map { (progress, _) ->
+            previous[progress.targetPath]?.takeIf { it.status == UploadStatus.COMPLETED } ?: progress
+        }
+        updateUploadItem(id) { it.copy(files = resumedFiles) }
+        directories.forEach { client.createFolder(account, it, allowExisting = resuming) }
+        files.forEach { (progress, source) ->
+            val current = resumedFiles.first { it.targetPath == progress.targetPath }
+            if (current.status != UploadStatus.COMPLETED) uploadFile(account, id, current, source)
+        }
     }
 
     private fun uploadFile(account: Account, id: Long, file: UploadFileProgress, source: UploadSource.File) {
@@ -957,7 +999,12 @@ private fun FileUiState.withoutPreview() = copy(
     previewError = null,
 )
 
-private data class UploadJob(val item: UploadQueueItem, val source: UploadSource)
+private data class UploadJob(
+    val item: UploadQueueItem,
+    val source: UploadSource,
+    val automaticRetries: Int = 0,
+    val resuming: Boolean = false,
+)
 private data class ImagePrefetch(val file: CloudFile, val bytes: Deferred<ByteArray>)
 private sealed interface UploadSource {
     data class File(val uri: Uri, val size: Long, val mimeType: String?) : UploadSource
@@ -981,3 +1028,21 @@ internal fun foldersToPrefetch(files: List<CloudFile>): List<String> = files
     .distinct()
 
 private fun CloudFile.samePreviewVersion(other: CloudFile) = path == other.path && etag == other.etag
+
+internal fun UploadQueueItem.readyForRetry() = copy(
+    status = UploadStatus.QUEUED,
+    error = null,
+    files = files?.map { file ->
+        if (file.status == UploadStatus.COMPLETED) file
+        else file.copy(bytesSent = 0, status = UploadStatus.QUEUED, error = null)
+    },
+)
+
+internal fun Throwable.isTransientUploadFailure(): Boolean = when (this) {
+    is UnknownHostException, is ConnectException, is SocketTimeoutException, is SocketException -> true
+    is NextcloudException -> statusCode == 429 || statusCode in 500..599
+    else -> cause?.takeUnless { it === this }?.isTransientUploadFailure() == true
+}
+
+internal fun nextAutomaticUploadRetry(completedRetries: Int, failure: Throwable): Int? =
+    if (completedRetries == 0 && failure.isTransientUploadFailure()) 1 else null

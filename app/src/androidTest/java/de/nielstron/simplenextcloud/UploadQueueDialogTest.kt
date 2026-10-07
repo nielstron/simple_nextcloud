@@ -32,7 +32,7 @@ class UploadQueueDialogTest {
         var opened: UploadQueueItem? = null
         compose.setContent {
             MaterialTheme {
-                UploadQueueDialog(listOf(folder), {}, {}, { opened = it })
+                UploadQueueDialog(listOf(folder), {}, {}, {}, { opened = it })
             }
         }
         compose.onNodeWithText("Uploading · 50%").assertIsDisplayed()
@@ -47,5 +47,19 @@ class UploadQueueDialogTest {
         }
         compose.onNodeWithContentDescription("Hide files in Photos").performScrollTo().performClick()
         compose.onNodeWithText("Nested/second.jpg").assertDoesNotExist()
+    }
+
+    @Test
+    fun failedQueueOffersRetryFailed() {
+        var retries = 0
+        val failed = UploadQueueItem(2, "report.pdf", "", false, UploadStatus.FAILED, "Unable to resolve host")
+        compose.setContent {
+            MaterialTheme {
+                UploadQueueDialog(listOf(failed), {}, {}, { retries++ }, {})
+            }
+        }
+
+        compose.onNodeWithText("Retry failed").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(1, retries) }
     }
 }

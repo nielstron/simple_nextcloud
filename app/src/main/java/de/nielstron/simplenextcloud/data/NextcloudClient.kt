@@ -145,10 +145,10 @@ class NextcloudClient(
         )
     }
 
-    fun createFolder(account: Account, path: String) {
+    fun createFolder(account: Account, path: String, allowExisting: Boolean = false) {
         executeEmpty(
             authenticated(account, NextcloudPath.davUrl(account, path)).method("MKCOL", null).build(),
-            setOf(201),
+            if (allowExisting) setOf(201, 405) else setOf(201),
         )
     }
 

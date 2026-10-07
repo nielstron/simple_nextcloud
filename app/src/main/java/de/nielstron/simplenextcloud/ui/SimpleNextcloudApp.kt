@@ -786,6 +786,7 @@ internal fun FilesScreen(
             items = state.uploadQueue,
             onDismiss = { uploadQueueOpen = false },
             onClearFinished = model::clearFinishedUploads,
+            onRetryFailed = model::retryFailedUploads,
             onOpenItem = { item ->
                 uploadQueueOpen = false
                 model.navigateToUpload(item)
@@ -1036,9 +1037,11 @@ internal fun UploadQueueDialog(
     items: List<UploadQueueItem>,
     onDismiss: () -> Unit,
     onClearFinished: () -> Unit,
+    onRetryFailed: () -> Unit,
     onOpenItem: (UploadQueueItem) -> Unit,
 ) {
     val hasFinished = items.any { it.status in setOf(UploadStatus.COMPLETED, UploadStatus.FAILED) }
+    val hasFailed = items.any { it.status == UploadStatus.FAILED }
     var expandedFolders by remember { mutableStateOf(emptySet<Long>()) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1092,7 +1095,10 @@ internal fun UploadQueueDialog(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
         dismissButton = {
-            if (hasFinished) TextButton(onClick = onClearFinished) { Text("Clear finished") }
+            Row {
+                if (hasFailed) TextButton(onClick = onRetryFailed) { Text("Retry failed") }
+                if (hasFinished) TextButton(onClick = onClearFinished) { Text("Clear finished") }
+            }
         },
     )
 }
