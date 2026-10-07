@@ -63,7 +63,7 @@ data class FileUiState(
     val downloadedMimeType: String? = null,
     val localOpenUri: Uri? = null,
     val localOpenMimeType: String? = null,
-    val clipboardFile: CloudFile? = null,
+    val clipboardFiles: List<CloudFile> = emptyList(),
     val clipboardMode: ClipboardMode? = null,
     val uploadQueue: List<UploadQueueItem> = emptyList(),
     val highlightedPath: String? = null,
@@ -633,6 +633,10 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         },
     ) { account -> client.delete(account, file) }
 
+    fun delete(files: List<CloudFile>) = mutateFiles(files, "deleted") { account, file ->
+        client.delete(account, file)
+    }
+
     fun rename(file: CloudFile, newName: String) = mutateAndRefresh(
         message = "Renamed to $newName",
         failureMessage = { renameFailureMessage(newName, it) },
@@ -652,28 +656,72 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         mutateAndRefresh("$trimmed created") { account -> client.createFolder(account, target) }
     }
 
-    fun stageTransfer(file: CloudFile, mode: ClipboardMode) {
+    fun stageTransfer(file: CloudFile, mode: ClipboardMode) = stageTransfer(listOf(file), mode)
+
+    fun stageTransfer(files: List<CloudFile>, mode: ClipboardMode) {
+        if (files.isEmpty()) return
         _state.update {
             it.copy(
-                clipboardFile = file,
+                clipboardFiles = files.distinctBy(CloudFile::path),
                 clipboardMode = mode,
-                message = "${file.name} ready to ${mode.name.lowercase()}",
+                message = "${files.size} item(s) ready to ${if (mode == ClipboardMode.COPY) "copy" else "move"}",
             )
         }
     }
 
-    fun clearClipboard() = _state.update { it.copy(clipboardFile = null, clipboardMode = null) }
+    fun clearClipboard() = _state.update { it.copy(clipboardFiles = emptyList(), clipboardMode = null) }
 
     fun paste() {
-        val file = _state.value.clipboardFile ?: return
+        if (_state.value.loading) return
+        val files = _state.value.clipboardFiles
+        if (files.isEmpty()) return
         val mode = _state.value.clipboardMode ?: return
         val destination = _state.value.path
-        mutateAndRefresh(
-            message = if (mode == ClipboardMode.COPY) "${file.name} copied" else "${file.name} moved",
-            onSuccess = ::clearClipboard,
-        ) { account ->
+        if (!canPasteFiles(files, destination)) return
+        mutateFiles(
+            files = files,
+            verb = if (mode == ClipboardMode.COPY) "copied" else "moved",
+            onCompleted = { result ->
+                _state.update { state ->
+                    if (state.clipboardFiles == files && state.clipboardMode == mode) {
+                        val remaining = result.failures.map { it.first }
+                        state.copy(clipboardFiles = remaining, clipboardMode = mode.takeIf { remaining.isNotEmpty() })
+                    } else state
+                }
+            },
+        ) { account, file ->
             if (mode == ClipboardMode.COPY) client.copy(account, file, destination)
             else client.move(account, file, destination)
+        }
+    }
+
+    private fun mutateFiles(
+        files: List<CloudFile>,
+        verb: String,
+        onCompleted: (FileBatchResult) -> Unit = {},
+        mutation: (Account, CloudFile) -> Unit,
+    ) {
+        if (files.isEmpty()) return
+        val currentPath = _state.value.path
+        var result = FileBatchResult(emptyList(), emptyList())
+        mutateAndRefresh(
+            message = "${files.size} item(s) $verb",
+            stateOnSuccess = { state ->
+                val updated = if (result.completed.any { it.path == state.previewFile?.path }) state.withoutPreview() else state
+                if (result.failures.isEmpty()) updated else updated.copy(
+                    message = null,
+                    error = "${result.completed.size} of ${files.size} item(s) $verb.\n\n" +
+                        result.failures.joinToString("\n") { (file, failure) -> "${file.name}: ${failure.userMessage()}" },
+                )
+            },
+        ) { account ->
+            folderCache.remove(currentPath)
+            result = performFileBatch(files) { mutation(account, it) }
+            result.completed.forEach { file ->
+                folderCache.remove(file.path.substringBeforeLast('/', ""))
+                if (file.isFolder) folderCache.remove(file.path)
+            }
+            onCompleted(result)
         }
     }
 
