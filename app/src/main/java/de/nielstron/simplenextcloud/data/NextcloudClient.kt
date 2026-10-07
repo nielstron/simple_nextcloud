@@ -118,6 +118,7 @@ class NextcloudClient(
         sourceUri: Uri,
         size: Long,
         mimeType: String?,
+        onProgress: (Long) -> Unit = {},
     ) {
         val body = object : RequestBody() {
             override fun contentType() = mimeType?.toMediaTypeOrNull()
@@ -128,7 +129,7 @@ class NextcloudClient(
         }
         executeEmpty(
             authenticated(account, NextcloudPath.davUrl(account, path))
-                .put(body)
+                .put(ProgressRequestBody(body, onProgress))
                 .header("If-None-Match", "*")
                 .build(),
             setOf(200, 201, 204),

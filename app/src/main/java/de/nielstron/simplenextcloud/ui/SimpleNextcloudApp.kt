@@ -51,6 +51,8 @@ import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
@@ -139,6 +141,7 @@ import de.nielstron.simplenextcloud.FileViewModel
 import de.nielstron.simplenextcloud.ClipboardMode
 import de.nielstron.simplenextcloud.UploadQueueItem
 import de.nielstron.simplenextcloud.UploadStatus
+import de.nielstron.simplenextcloud.uploadFraction
 import de.nielstron.simplenextcloud.previewableFiles
 import de.nielstron.simplenextcloud.canPasteFiles
 import de.nielstron.simplenextcloud.data.Account
@@ -1029,13 +1032,14 @@ private fun UploadSourceDialog(onDismiss: () -> Unit, onFiles: () -> Unit, onFol
 }
 
 @Composable
-private fun UploadQueueDialog(
+internal fun UploadQueueDialog(
     items: List<UploadQueueItem>,
     onDismiss: () -> Unit,
     onClearFinished: () -> Unit,
     onOpenItem: (UploadQueueItem) -> Unit,
 ) {
     val hasFinished = items.any { it.status in setOf(UploadStatus.COMPLETED, UploadStatus.FAILED) }
+    var expandedFolders by remember { mutableStateOf(emptySet<Long>()) }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.Upload, null) },
@@ -1045,37 +1049,41 @@ private fun UploadQueueDialog(
                 Text("The upload queue is empty.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
-                    items(items, key = { it.id }) { item ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenItem(item) }
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(
-                                if (item.isFolder) Icons.Outlined.Folder else Icons.AutoMirrored.Outlined.InsertDriveFile,
-                                null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                                Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    when (item.status) {
-                                        UploadStatus.QUEUED -> "Queued"
-                                        UploadStatus.UPLOADING -> "Uploading…"
-                                        UploadStatus.COMPLETED -> "Completed"
-                                        UploadStatus.FAILED -> item.error ?: "Failed"
+                    items.forEach { upload ->
+                        item(key = "upload-${upload.id}") {
+                            UploadQueueRow(upload, onOpenItem, trailingContent = {
+                                if (upload.isFolder && !upload.files.isNullOrEmpty()) {
+                                    val expanded = upload.id in expandedFolders
+                                    IconButton(onClick = {
+                                        expandedFolders = if (upload.id in expandedFolders) expandedFolders - upload.id
+                                        else expandedFolders + upload.id
+                                    }) {
+                                        Icon(
+                                            if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
+                                            if (expanded) "Hide files in ${upload.name}" else "Show files in ${upload.name}",
+                                        )
+                                    }
+                                }
+                            })
+                        }
+                        if (upload.id in expandedFolders) {
+                            items(upload.files.orEmpty(), key = { "${upload.id}:${it.targetPath}" }) { file ->
+                                UploadQueueRow(
+                                    item = UploadQueueItem(
+                                        id = upload.id,
+                                        name = file.relativePath,
+                                        targetPath = file.targetPath.substringBeforeLast('/', ""),
+                                        isFolder = false,
+                                        status = file.status,
+                                        error = file.error,
+                                        files = listOf(file),
+                                    ),
+                                    onOpenItem = {
+                                        onOpenItem(it.copy(name = file.targetPath.substringAfterLast('/')))
                                     },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (item.status == UploadStatus.FAILED) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 24.dp),
+                                    notUploaded = upload.status == UploadStatus.FAILED && file.status == UploadStatus.QUEUED,
                                 )
-                            }
-                            if (item.status == UploadStatus.UPLOADING) {
-                                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                            } else if (item.status == UploadStatus.COMPLETED) {
-                                Icon(Icons.Outlined.Check, "Completed")
                             }
                         }
                     }
@@ -1087,6 +1095,60 @@ private fun UploadQueueDialog(
             if (hasFinished) TextButton(onClick = onClearFinished) { Text("Clear finished") }
         },
     )
+}
+
+@Composable
+private fun UploadQueueRow(
+    item: UploadQueueItem,
+    onOpenItem: (UploadQueueItem) -> Unit,
+    modifier: Modifier = Modifier,
+    notUploaded: Boolean = false,
+    trailingContent: (@Composable () -> Unit)? = null,
+) {
+    val fraction = item.files?.let { files ->
+        if (!item.isFolder && files.any { it.size < 0 }) null else files.uploadFraction()
+    }
+    Row(
+        modifier = modifier.fillMaxWidth().clickable { onOpenItem(item) }.padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (item.isFolder) Icons.Outlined.Folder else Icons.AutoMirrored.Outlined.InsertDriveFile,
+            null,
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                when (item.status) {
+                    UploadStatus.QUEUED -> if (notUploaded) "Not uploaded" else "Queued"
+                    UploadStatus.UPLOADING -> {
+                        if (item.isFolder && item.files == null) "Preparing folder…"
+                        else if (fraction != null) "Uploading · ${(fraction * 100).toInt()}%"
+                        else "Uploading…"
+                    }
+                    UploadStatus.COMPLETED -> "Completed"
+                    UploadStatus.FAILED -> item.error ?: "Failed"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (item.status == UploadStatus.FAILED) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (item.isFolder && item.files != null) {
+                Text(
+                    "${item.files.count { it.status == UploadStatus.COMPLETED }}/${item.files.size} files uploaded",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (item.status == UploadStatus.UPLOADING) {
+                if (fraction == null) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
+                else LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+            }
+        }
+        if (item.status == UploadStatus.COMPLETED) Icon(Icons.Outlined.Check, "Completed")
+        trailingContent?.invoke()
+    }
 }
 
 @Composable

@@ -80,6 +80,7 @@ data class UploadQueueItem(
     val isFolder: Boolean,
     val status: UploadStatus = UploadStatus.QUEUED,
     val error: String? = null,
+    val files: List<UploadFileProgress>? = null,
 )
 
 class FileViewModel(application: Application) : AndroidViewModel(application) {
@@ -320,7 +321,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                         null,
                     )?.use { cursor ->
                         check(cursor.moveToFirst())
-                        cursor.getString(0) to cursor.getLong(1)
+                        cursor.getString(0) to if (cursor.isNull(1)) -1L else cursor.getLong(1)
                     } ?: error("The selected document has no metadata")
                     details.first to UploadSource.File(uri, details.second, resolver.getType(uri))
                 }
@@ -802,17 +803,18 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching {
                     withContext(Dispatchers.IO) {
                         when (val source = job.source) {
-                            is UploadSource.File -> client.upload(
-                                account,
-                                NextcloudPath.child(job.item.targetPath, job.item.name),
-                                getApplication<Application>().contentResolver,
-                                source.uri,
-                                source.size,
-                                source.mimeType,
-                            )
+                            is UploadSource.File -> {
+                                val file = UploadFileProgress(
+                                    job.item.name,
+                                    NextcloudPath.child(job.item.targetPath, job.item.name),
+                                    source.size,
+                                )
+                                updateUploadItem(job.item.id) { it.copy(files = listOf(file)) }
+                                uploadFile(account, job.item.id, file, source)
+                            }
                             is UploadSource.Folder -> uploadFolder(
                                 account,
-                                getApplication<Application>().contentResolver,
+                                job.item.id,
                                 requireNotNull(DocumentFile.fromTreeUri(getApplication(), source.uri)),
                                 NextcloudPath.child(job.item.targetPath, job.item.name),
                             )
@@ -830,27 +832,63 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun uploadFolder(
         account: Account,
-        resolver: ContentResolver,
+        id: Long,
         folder: DocumentFile,
         targetPath: String,
     ) {
-        client.createFolder(account, targetPath)
-        folder.listFiles().forEach { child ->
-            val name = requireNotNull(child.name) { "An upload item has no name" }
-            val childTarget = NextcloudPath.child(targetPath, name)
-            if (child.isDirectory) uploadFolder(account, resolver, child, childTarget)
-            else client.upload(account, childTarget, resolver, child.uri, child.length(), child.type)
+        val directories = mutableListOf<String>()
+        val files = mutableListOf<Pair<UploadFileProgress, UploadSource.File>>()
+        fun scan(directory: DocumentFile, relativePath: String) {
+            directories += NextcloudPath.child(targetPath, relativePath)
+            directory.listFiles().forEach { child ->
+                val childPath = NextcloudPath.child(relativePath, requireNotNull(child.name) { "An upload item has no name" })
+                if (child.isDirectory) scan(child, childPath)
+                else {
+                    val size = child.length()
+                    files += UploadFileProgress(childPath, NextcloudPath.child(targetPath, childPath), size) to
+                        UploadSource.File(child.uri, size, child.type)
+                }
+            }
+        }
+        scan(folder, "")
+        updateUploadItem(id) { it.copy(files = files.map { (progress, _) -> progress }) }
+        directories.forEach { client.createFolder(account, it) }
+        files.forEach { (progress, source) -> uploadFile(account, id, progress, source) }
+    }
+
+    private fun uploadFile(account: Account, id: Long, file: UploadFileProgress, source: UploadSource.File) {
+        updateUploadFile(id, file.targetPath) { it.copy(status = UploadStatus.UPLOADING) }
+        try {
+            client.upload(
+                account,
+                file.targetPath,
+                getApplication<Application>().contentResolver,
+                source.uri,
+                source.size,
+                source.mimeType,
+                onProgress = { sent -> updateUploadFile(id, file.targetPath) { it.copy(bytesSent = sent) } },
+            )
+            updateUploadFile(id, file.targetPath) { it.copy(status = UploadStatus.COMPLETED) }
+        } catch (failure: Exception) {
+            updateUploadFile(id, file.targetPath) { it.copy(status = UploadStatus.FAILED, error = failure.userMessage()) }
+            throw failure
+        }
+    }
+
+    private fun updateUploadFile(id: Long, path: String, transform: (UploadFileProgress) -> UploadFileProgress) {
+        updateUploadItem(id) { item ->
+            item.copy(files = requireNotNull(item.files).map { if (it.targetPath == path) transform(it) else it })
+        }
+    }
+
+    private fun updateUploadItem(id: Long, transform: (UploadQueueItem) -> UploadQueueItem) {
+        _state.update { state ->
+            state.copy(uploadQueue = state.uploadQueue.map { if (it.id == id) transform(it) else it })
         }
     }
 
     private fun updateUpload(id: Long, status: UploadStatus, error: String? = null) {
-        _state.update {
-            it.copy(
-                uploadQueue = it.uploadQueue.map { item ->
-                    if (item.id == id) item.copy(status = status, error = error) else item
-                },
-            )
-        }
+        updateUploadItem(id) { it.copy(status = status, error = error) }
     }
 
     /** Fetches every child directory listing concurrently. Only PROPFIND metadata is requested. */
