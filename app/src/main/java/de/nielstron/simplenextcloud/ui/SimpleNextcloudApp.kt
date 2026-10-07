@@ -74,6 +74,8 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Upload
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -124,6 +126,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
@@ -1411,13 +1414,11 @@ private fun ShareDialog(
                 }
                 AnimatedVisibility(showLinkOptions) {
                     Column {
-                        OutlinedTextField(
+                        SharePasswordField(
                             value = password,
                             onValueChange = { password = it },
                             modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Password (optional)") },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
+                            label = "Password (optional)",
                         )
                         OutlinedTextField(
                             value = expiry,
@@ -1467,6 +1468,37 @@ private fun ShareDialog(
             }
         }
     }
+}
+
+@Composable
+internal fun SharePasswordField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    supportingText: (@Composable () -> Unit)? = null,
+) {
+    var passwordVisible by remember { mutableStateOf(true) }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        modifier = modifier,
+        enabled = enabled,
+        supportingText = supportingText,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { passwordVisible = !passwordVisible }, enabled = enabled) {
+                Icon(
+                    imageVector = if (passwordVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                    contentDescription = if (passwordVisible) "Hide password" else "Show password",
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -1542,15 +1574,13 @@ private fun ExistingShareEditor(
                         isError = !validExpiry,
                         singleLine = true,
                     )
-                    OutlinedTextField(
+                    SharePasswordField(
                         value = newPassword,
                         onValueChange = { newPassword = it; removePassword = false },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("New password") },
+                        label = "New password",
                         supportingText = { Text("Leave blank to keep the current password") },
                         enabled = !removePassword,
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
