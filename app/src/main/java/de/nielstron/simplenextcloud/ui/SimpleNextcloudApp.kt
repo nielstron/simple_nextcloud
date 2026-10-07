@@ -15,6 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -55,6 +56,7 @@ import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Delete
@@ -138,6 +140,7 @@ import de.nielstron.simplenextcloud.ClipboardMode
 import de.nielstron.simplenextcloud.UploadQueueItem
 import de.nielstron.simplenextcloud.UploadStatus
 import de.nielstron.simplenextcloud.previewableFiles
+import de.nielstron.simplenextcloud.canPasteFiles
 import de.nielstron.simplenextcloud.data.Account
 import de.nielstron.simplenextcloud.data.CloudFile
 import de.nielstron.simplenextcloud.data.ExistingShare
@@ -290,7 +293,7 @@ private fun modifiedEpochSeconds(value: String): Long =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FilesScreen(
+internal fun FilesScreen(
     state: FileUiState,
     model: FileViewModel,
     sharedUris: List<android.net.Uri>,
@@ -302,6 +305,13 @@ private fun FilesScreen(
     var sharing by remember { mutableStateOf<CloudFile?>(null) }
     var pendingDownload by remember { mutableStateOf<CloudFile?>(null) }
     var deleteTarget by remember { mutableStateOf<CloudFile?>(null) }
+    var deleteSelection by remember { mutableStateOf<List<CloudFile>>(emptyList()) }
+    var selectedPaths by remember(state.account, state.path) { mutableStateOf<Set<String>>(emptySet()) }
+    val selectedFiles = state.files.filter { it.path in selectedPaths }
+    val selecting = selectedPaths.isNotEmpty()
+    fun toggleSelection(file: CloudFile) {
+        selectedPaths = if (file.path in selectedPaths) selectedPaths - file.path else selectedPaths + file.path
+    }
     var renameTarget by remember { mutableStateOf<CloudFile?>(null) }
     var clipboardMenuOpen by remember { mutableStateOf(false) }
     var uploadSourceOpen by remember { mutableStateOf(false) }
@@ -332,6 +342,10 @@ private fun FilesScreen(
     }
 
     BackHandler(enabled = sharedUris.isEmpty() && state.path.isNotEmpty(), onBack = model::up)
+    BackHandler(enabled = selecting) { selectedPaths = emptySet() }
+    LaunchedEffect(state.files, state.loading) {
+        if (!state.loading) selectedPaths = selectedPaths.intersect(state.files.map { it.path }.toSet())
+    }
     LaunchedEffect(state.message, state.shareUrl, state.downloadedUri) {
         state.shareUrl?.let { url ->
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -372,7 +386,22 @@ private fun FilesScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            TopAppBar(
+            if (selecting) {
+                FileSelectionTopBar(
+                    count = selectedFiles.size,
+                    enabled = !state.loading && selectedFiles.isNotEmpty(),
+                    onClose = { selectedPaths = emptySet() },
+                    onCopy = {
+                        model.stageTransfer(selectedFiles, ClipboardMode.COPY)
+                        selectedPaths = emptySet()
+                    },
+                    onCut = {
+                        model.stageTransfer(selectedFiles, ClipboardMode.MOVE)
+                        selectedPaths = emptySet()
+                    },
+                    onDelete = { deleteSelection = selectedFiles },
+                )
+            } else TopAppBar(
                 title = {
                     Box {
                         Column(Modifier.clickable { breadcrumbMenuOpen = true }) {
@@ -432,11 +461,8 @@ private fun FilesScreen(
                             }
                         }
                     }
-                    state.clipboardFile?.let { clipboardFile ->
-                        val sourceParent = clipboardFile.path.substringBeforeLast('/', "")
-                        val insideSource = clipboardFile.isFolder &&
-                            (state.path == clipboardFile.path || state.path.startsWith("${clipboardFile.path}/"))
-                        val canPaste = state.path != sourceParent && !insideSource
+                    if (state.clipboardFiles.isNotEmpty()) {
+                        val canPaste = canPasteFiles(state.clipboardFiles, state.path) && !state.loading
                         Box {
                             IconButton(onClick = { clipboardMenuOpen = true }) {
                                 Icon(Icons.Outlined.ContentPaste, "Clipboard")
@@ -448,7 +474,12 @@ private fun FilesScreen(
                                 DropdownMenuItem(
                                     text = {
                                         Column {
-                                            Text(clipboardFile.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(
+                                                if (state.clipboardFiles.size == 1) state.clipboardFiles.single().name
+                                                else "${state.clipboardFiles.size} items",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
                                             Text(
                                                 state.clipboardMode?.name?.lowercase().orEmpty(),
                                                 style = MaterialTheme.typography.bodySmall,
@@ -521,7 +552,9 @@ private fun FilesScreen(
             )
         },
         floatingActionButton = {
-            if (sharedUris.isNotEmpty()) {
+            if (selecting) {
+                // Keep the file list clear while selecting items.
+            } else if (sharedUris.isNotEmpty()) {
                 ExtendedFloatingActionButton(
                     onClick = {
                         model.enqueueFiles(resolver, sharedUris)
@@ -602,8 +635,12 @@ private fun FilesScreen(
                         FileRow(
                             file = file,
                             highlighted = file.path == state.highlightedPath,
+                            selecting = selecting,
+                            selected = file.path in selectedPaths,
+                            onSelect = { toggleSelection(file) },
                             onOpen = {
                                 when {
+                                    selecting -> toggleSelection(file)
                                     file.isFolder -> model.open(file)
                                     file.mimeType?.let { it.startsWith("image/") || it.startsWith("video/") } == true ->
                                         model.showPreview(file)
@@ -687,6 +724,22 @@ private fun FilesScreen(
                 deleteTarget = null
                 model.delete(file)
             },
+        )
+    }
+
+    if (deleteSelection.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { deleteSelection = emptyList() },
+            title = { Text("Delete ${deleteSelection.size} items?") },
+            text = { Text("Delete the selected files and folders? Folders and their contents will be deleted.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    model.delete(deleteSelection)
+                    deleteSelection = emptyList()
+                    selectedPaths = emptySet()
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteSelection = emptyList() }) { Text("Cancel") } },
         )
     }
 
@@ -775,9 +828,35 @@ private fun ParentFolderRow(onOpen: () -> Unit) {
 }
 
 @Composable
-private fun FileRow(
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun FileSelectionTopBar(
+    count: Int,
+    enabled: Boolean,
+    onClose: () -> Unit,
+    onCopy: () -> Unit,
+    onCut: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    TopAppBar(
+        title = { Text("$count selected") },
+        navigationIcon = {
+            IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, "Clear selection") }
+        },
+        actions = {
+            IconButton(onClick = onCopy, enabled = enabled) { Icon(Icons.Outlined.ContentCopy, "Copy selected files") }
+            IconButton(onClick = onCut, enabled = enabled) { Icon(Icons.Outlined.ContentCut, "Cut selected files") }
+            IconButton(onClick = onDelete, enabled = enabled) { Icon(Icons.Outlined.Delete, "Delete selected files") }
+        },
+    )
+}
+
+@Composable
+internal fun FileRow(
     file: CloudFile,
     highlighted: Boolean,
+    selecting: Boolean = false,
+    selected: Boolean = false,
+    onSelect: () -> Unit,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
     onCopy: () -> Unit,
@@ -791,10 +870,10 @@ private fun FileRow(
         Modifier
             .fillMaxWidth()
             .background(
-                if (highlighted) MaterialTheme.colorScheme.primaryContainer
+                if (selected || highlighted) MaterialTheme.colorScheme.primaryContainer
                 else Color.Transparent,
             )
-            .clickable(onClick = onOpen)
+            .combinedClickable(onClick = onOpen, onLongClick = onSelect, onLongClickLabel = "Select ${file.name}")
             .padding(start = 18.dp, top = 12.dp, bottom = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -829,7 +908,9 @@ private fun FileRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Box {
+        if (selecting) {
+            Checkbox(checked = selected, onCheckedChange = { onSelect() })
+        } else Box {
             IconButton(onClick = { optionsOpen = true }, modifier = Modifier.size(42.dp)) {
                 Icon(Icons.Outlined.MoreVert, "Options for ${file.name}")
             }
