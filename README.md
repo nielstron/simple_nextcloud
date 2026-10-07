@@ -31,7 +31,7 @@ Most importantly for me, it distinguishes itself from the official Nextcloud cli
 
 ## Installation
 
-Download and install the APK from the [Releases page](https://github.com/nielstron/simple_nextcloud/releases). You may have to click through a few scary screens that ask you whether you are installing malware (you are not).
+Download from [FDroid](https://f-droid.org/en/packages/de.nielstron.simplenextcloud/) or alternatively install the APK from the [Releases page](https://github.com/nielstron/simple_nextcloud/releases). You may have to click through a few scary screens that ask you whether you are installing malware (you are not).
 
 ## Build
 
