@@ -20,8 +20,8 @@ android {
         applicationId = "de.nielstron.simplenextcloud"
         minSdk = 26
         targetSdk = 37
-        versionCode = 8
-        versionName = "1.0.5"
+        versionCode = 9
+        versionName = "1.0.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -84,6 +84,7 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

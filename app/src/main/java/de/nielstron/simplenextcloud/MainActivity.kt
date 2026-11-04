@@ -43,6 +43,12 @@ class MainActivity : ComponentActivity() {
         pendingLocalNetworkAction = null
         if (granted) action?.invoke() else model.localNetworkPermissionDenied()
     }
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        model.setNotificationsEnabled(granted)
+        if (!granted) model.showError("Allow notifications for Simple Nextcloud in the system settings to turn them on")
+    }
     private val pendingLoginTabSession by lazy {
         CustomTabsClient.newPendingSession(this, CustomTabsCallback(), LOGIN_TAB_SESSION_ID)
     }
@@ -81,9 +87,18 @@ class MainActivity : ComponentActivity() {
                     onStartBrowserLogin = { server ->
                         withLocalNetworkAccess(server) { model.startBrowserLogin(server) }
                     },
+                    onNotificationsChange = ::changeNotifications,
                     onOpenLoginUrl = ::openLoginTab,
                 )
             }
+        }
+    }
+
+    private fun changeNotifications(enabled: Boolean) {
+        if (enabled && !ServerNotifications.canPost(this) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            model.setNotificationsEnabled(enabled)
         }
     }
 

@@ -166,8 +166,27 @@ fun SimpleNextcloudApp(
     sharedUris: List<android.net.Uri> = emptyList(),
     onSharedUrisConsumed: () -> Unit = {},
     onStartBrowserLogin: (String) -> Unit = model::startBrowserLogin,
+    onNotificationsChange: (Boolean) -> Unit = model::setNotificationsEnabled,
     onOpenLoginUrl: (String) -> Unit,
 ) {
+    state.certificatePrompt?.let { certificate ->
+        CertificateDialog(certificate, onTrust = model::trustCertificate, onReject = model::rejectCertificate)
+    }
+    state.insecureHttpPrompt?.let { server ->
+        AlertDialog(
+            onDismissRequest = model::dismissInsecureHttp,
+            title = { Text("Connect without encryption?") },
+            text = {
+                Text(
+                    "$server uses plain HTTP. Your app password and every file you open or upload are sent " +
+                        "unencrypted, so anyone on the same network can read or change them. Only continue on a " +
+                        "network you trust, such as your home network.",
+                )
+            },
+            confirmButton = { TextButton(onClick = model::confirmInsecureHttp) { Text("Connect anyway") } },
+            dismissButton = { TextButton(onClick = model::dismissInsecureHttp) { Text("Cancel") } },
+        )
+    }
     if (state.account == null) {
         LoginScreen(
             loading = state.loading,
@@ -182,8 +201,42 @@ fun SimpleNextcloudApp(
             onClearError = model::clearNotice,
         )
     } else {
-        FilesScreen(state, model, sharedUris, onSharedUrisConsumed)
+        FilesScreen(state, model, sharedUris, onSharedUrisConsumed, onNotificationsChange)
     }
+}
+
+@Composable
+private fun CertificateDialog(
+    certificate: de.nielstron.simplenextcloud.data.UntrustedCertificate,
+    onTrust: () -> Unit,
+    onReject: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onReject,
+        title = { Text("Trust this certificate?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "${certificate.host} presents a certificate this device doesn't trust, for example a " +
+                        "self-signed one. Only trust it if the fingerprint below matches your server's; otherwise " +
+                        "someone may be intercepting the connection.",
+                )
+                Text("SHA-256 fingerprint", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    certificate.sha256,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                )
+                Text(
+                    "Issued to ${certificate.subject}\nIssued by ${certificate.issuer}\nValid until ${certificate.validUntil}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onTrust) { Text("Trust") } },
+        dismissButton = { TextButton(onClick = onReject) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -229,7 +282,7 @@ private fun LoginScreen(
                     label = { Text("Nextcloud address") },
                     placeholder = { Text("https://cloud.example.com") },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
                     shape = RoundedCornerShape(14.dp),
                 )
                 AnimatedVisibility(error != null) {
@@ -301,6 +354,7 @@ internal fun FilesScreen(
     model: FileViewModel,
     sharedUris: List<android.net.Uri>,
     onSharedUrisConsumed: () -> Unit,
+    onNotificationsChange: (Boolean) -> Unit = model::setNotificationsEnabled,
 ) {
     var search by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
@@ -532,6 +586,13 @@ internal fun FilesScreen(
                                     Checkbox(checked = showHiddenFiles, onCheckedChange = null)
                                 },
                                 onClick = { showHiddenFiles = !showHiddenFiles },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Notifications") },
+                                trailingIcon = {
+                                    Checkbox(checked = state.notificationsEnabled, onCheckedChange = null)
+                                },
+                                onClick = { onNotificationsChange(!state.notificationsEnabled) },
                             )
                             DropdownMenuItem(
                                 text = {

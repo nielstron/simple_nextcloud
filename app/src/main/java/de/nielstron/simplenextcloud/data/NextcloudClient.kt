@@ -405,6 +405,41 @@ class NextcloudClient(
     private fun shareApiUrl(account: Account) =
         "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v2.php/apps/files_sharing/api/v1/shares"
 
+    /** The user's Nextcloud notifications, newest first; empty when the notifications app is off. */
+    fun notifications(account: Account): List<ServerNotification> {
+        val request = authenticated(
+            account,
+            "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/ocs/v2.php/apps/notifications/api/v2/notifications",
+        )
+            .get()
+            .header("OCS-APIRequest", "true")
+            .header("Accept", "application/json")
+            .build()
+        return http.newCall(request).execute().use { response ->
+            // 404: the notifications app is disabled; 204: nothing to show.
+            if (response.code == 404 || response.code == 204) return emptyList()
+            parseNotifications(parseOcs(response.code, response.message, response.body.string()))
+        }
+    }
+
+    internal fun parseNotifications(ocs: JSONObject): List<ServerNotification> {
+        val data = ocs.optJSONArray("data") ?: return emptyList()
+        return buildList {
+            for (index in 0 until data.length()) {
+                val item = data.getJSONObject(index)
+                add(
+                    ServerNotification(
+                        id = item.getLong("notification_id"),
+                        app = item.optString("app"),
+                        subject = item.optString("subject"),
+                        message = item.optString("message"),
+                        link = item.optString("link").takeIf(String::isNotBlank),
+                    ),
+                )
+            }
+        }.sortedByDescending(ServerNotification::id)
+    }
+
     private fun executeOcs(request: Request): JSONObject = http.newCall(request).execute().use { response ->
         parseOcs(response.code, response.message, response.body.string())
     }
@@ -503,6 +538,14 @@ class NextcloudClient(
         }
     }
 }
+
+data class ServerNotification(
+    val id: Long,
+    val app: String,
+    val subject: String,
+    val message: String,
+    val link: String?,
+)
 
 class NextcloudException(val statusCode: Int, val serverMessage: String) :
     Exception("Nextcloud returned $statusCode: $serverMessage")

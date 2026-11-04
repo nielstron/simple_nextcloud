@@ -23,6 +23,8 @@ import de.nielstron.simplenextcloud.data.ShareUser
 import de.nielstron.simplenextcloud.data.ShareHistoryStore
 import de.nielstron.simplenextcloud.data.persistentFolderListingCache
 import de.nielstron.simplenextcloud.data.ShareUpdate
+import de.nielstron.simplenextcloud.data.TrustedCertificates
+import de.nielstron.simplenextcloud.data.UntrustedCertificate
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -73,6 +75,11 @@ data class FileUiState(
     val highlightedPath: String? = null,
     val loginUrl: String? = null,
     val loginWaiting: Boolean = false,
+    /** A server certificate the system doesn't trust, waiting for the user to accept or reject it. */
+    val certificatePrompt: UntrustedCertificate? = null,
+    /** An http:// address waiting for the user to confirm connecting without encryption. */
+    val insecureHttpPrompt: String? = null,
+    val notificationsEnabled: Boolean = false,
 )
 
 enum class ClipboardMode { COPY, MOVE }
@@ -89,7 +96,9 @@ data class UploadQueueItem(
 
 class FileViewModel(application: Application) : AndroidViewModel(application) {
     private val store = AccountStore(application)
-    private val client = NextcloudClient()
+    private val trustedCertificates = TrustedCertificates.get(application)
+    private val client = NextcloudClient(trustedCertificates.client)
+    private var certificateRetry: (() -> Unit)? = null
     private val shareHistory = ShareHistoryStore(application)
     private val initialAccount = store.load()
     private var folderCache = initialAccount?.let {
@@ -108,7 +117,9 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingMutationCount = 0
     private val uploadJobs = ArrayDeque<UploadJob>()
     private val uploadJobArchive = mutableMapOf<Long, UploadJob>()
-    private val _state = MutableStateFlow(FileUiState(account = initialAccount))
+    private val _state = MutableStateFlow(
+        FileUiState(account = initialAccount, notificationsEnabled = ServerNotifications.isEnabled(application)),
+    )
     val state = _state.asStateFlow()
 
     init {
@@ -145,10 +156,14 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         beginBrowserLogin(NextcloudPath.serverRoot(pendingLogin.session.loginUrl))
     }
 
-    private fun beginBrowserLogin(server: String) {
+    private fun beginBrowserLogin(server: String, allowHttp: Boolean = false) {
         val serverUrl = NextcloudPath.normalizeServerUrl(server)
-        if (!serverUrl.startsWith("https://")) {
-            _state.update { it.copy(error = "Use an HTTPS Nextcloud address") }
+        if (serverUrl.startsWith("http://") && !allowHttp) {
+            _state.update { it.copy(insecureHttpPrompt = serverUrl, error = null) }
+            return
+        }
+        if (!serverUrl.startsWith("https://") && !serverUrl.startsWith("http://")) {
+            _state.update { it.copy(error = "Use an https:// or http:// Nextcloud address") }
             return
         }
         loginJob?.cancel()
@@ -158,6 +173,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { withContext(Dispatchers.IO) { client.initiateLogin(serverUrl) } }
                 .onFailure { failure ->
                     _state.update { it.copy(loading = false, loginWaiting = false, error = failure.userMessage()) }
+                    promptForCertificate(failure, serverUrl) { beginBrowserLogin(serverUrl, allowHttp = true) }
                 }
                 .onSuccess { session ->
                     val pendingLogin = store.savePendingLogin(session)
@@ -226,6 +242,43 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 }
     }
 
+    fun confirmInsecureHttp() {
+        val server = _state.value.insecureHttpPrompt ?: return
+        _state.update { it.copy(insecureHttpPrompt = null) }
+        beginBrowserLogin(server, allowHttp = true)
+    }
+
+    fun dismissInsecureHttp() = _state.update { it.copy(insecureHttpPrompt = null) }
+
+    /** If [failure] is an untrusted certificate, asks the user about it; [retry] runs once they accept. */
+    private fun promptForCertificate(failure: Throwable, serverUrl: String, retry: () -> Unit) {
+        if (!TrustedCertificates.isCertificateFailure(failure) || _state.value.certificatePrompt != null) return
+        viewModelScope.launch {
+            val certificate = runCatching { withContext(Dispatchers.IO) { TrustedCertificates.fetch(serverUrl) } }
+                .getOrNull() ?: return@launch
+            certificateRetry = retry
+            _state.update { it.copy(certificatePrompt = certificate) }
+        }
+    }
+
+    fun trustCertificate() {
+        val certificate = _state.value.certificatePrompt ?: return
+        trustedCertificates.trust(certificate)
+        _state.update { it.copy(certificatePrompt = null, error = null) }
+        certificateRetry?.invoke()
+        certificateRetry = null
+    }
+
+    fun rejectCertificate() {
+        certificateRetry = null
+        _state.update { it.copy(certificatePrompt = null) }
+    }
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        ServerNotifications.setEnabled(getApplication(), enabled)
+        _state.update { it.copy(notificationsEnabled = enabled) }
+    }
+
     fun consumeLoginUrl() = _state.update { it.copy(loginUrl = null) }
 
     fun cancelBrowserLogin() {
@@ -246,6 +299,8 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         imagePreviewCache?.clear()
         imagePreviewCache = null
         store.clear()
+        trustedCertificates.clear()
+        ServerNotifications.setEnabled(getApplication(), false)
         notifyDocumentRoots()
         _state.value = FileUiState()
     }
@@ -307,6 +362,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                                 error = failure.userMessage(),
                             )
                         }
+                        promptForCertificate(failure, account.serverUrl, ::refresh)
                     }
                 }
         }
@@ -763,6 +819,8 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearError() = _state.update { it.copy(error = null) }
 
+    fun showError(message: String) = _state.update { it.copy(error = message) }
+
     fun clearSuccessNotice() = _state.update {
         it.copy(
             message = null,
@@ -971,7 +1029,11 @@ internal fun Throwable.userMessage(): String = when (this) {
         in 500..599 -> "Nextcloud had a server problem (HTTP $statusCode). Try again later."
         else -> message ?: "Nextcloud rejected the request (HTTP $statusCode)."
     }
-    else -> message ?: "Something went wrong"
+    else -> if (TrustedCertificates.isCertificateFailure(this)) {
+        "The server's certificate isn't trusted by this device."
+    } else {
+        message ?: "Something went wrong"
+    }
 }
 
 private fun NextcloudException.specificServerMessage(fallback: String): String =

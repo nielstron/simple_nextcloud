@@ -1,0 +1,1 @@
+Optional Nextcloud notifications (menu → Notifications), checked about every 15 minutes. Self-signed certificates can be trusted after checking their fingerprint, and plain http:// addresses work after a warning.

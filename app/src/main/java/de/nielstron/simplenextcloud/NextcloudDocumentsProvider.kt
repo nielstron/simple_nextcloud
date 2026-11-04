@@ -17,6 +17,7 @@ import de.nielstron.simplenextcloud.data.AccountStore
 import de.nielstron.simplenextcloud.data.CloudFile
 import de.nielstron.simplenextcloud.data.DocumentIds
 import de.nielstron.simplenextcloud.data.NextcloudClient
+import de.nielstron.simplenextcloud.data.TrustedCertificates
 import java.io.File
 import java.io.FileNotFoundException
 import java.security.MessageDigest
@@ -25,7 +26,7 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
 
 class NextcloudDocumentsProvider : DocumentsProvider() {
-    private val client = NextcloudClient()
+    private val client by lazy { NextcloudClient(TrustedCertificates.client(requireNotNull(context))) }
 
     override fun onCreate() = true
 
