@@ -94,14 +94,16 @@ class NextcloudClient(
             })
         }
 
-    private fun listRequest(account: Account, path: String): Request {
+    private fun listRequest(account: Account, path: String) = propfindRequest(account, path, depth = "1")
+
+    private fun propfindRequest(account: Account, path: String, depth: String): Request {
         val body = """<?xml version="1.0"?>
-            <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
-              <d:prop><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/><d:getetag/><oc:fileid/><oc:owner-id/><oc:owner-display-name/><oc:share-types/><nc:mount-type/></d:prop>
+            <d:propfind $DAV_NAMESPACES>
+              <d:prop>$FILE_PROPERTIES</d:prop>
             </d:propfind>""".trimIndent()
         return authenticated(account, NextcloudPath.davUrl(account, path))
             .method("PROPFIND", body.toRequestBody("application/xml".toMediaTypeOrNull()))
-            .header("Depth", "1")
+            .header("Depth", depth)
             .build()
     }
 
@@ -109,6 +111,54 @@ class NextcloudClient(
         if (response.code != 207) throw NextcloudException(response.code, response.message)
         return parseFiles(response.body.byteStream(), account.username)
             .filterNot { it.path.trim('/') == path.trim('/') }
+    }
+
+    /** Metadata of a single file or folder, including its file ID and favorite flag. */
+    fun stat(account: Account, path: String): CloudFile =
+        http.newCall(propfindRequest(account, path, depth = "0")).execute().use { response ->
+            if (response.code != 207) throw NextcloudException(response.code, response.message)
+            parseFiles(response.body.byteStream(), account.username).single()
+        }
+
+    /** Every file and folder the user starred, in any folder. */
+    fun favorites(account: Account): List<CloudFile> {
+        val body = """<?xml version="1.0"?>
+            <oc:filter-files $DAV_NAMESPACES>
+              <d:prop>$FILE_PROPERTIES</d:prop>
+              <oc:filter-rules><oc:favorite>1</oc:favorite></oc:filter-rules>
+            </oc:filter-files>""".trimIndent()
+        val request = authenticated(account, NextcloudPath.davUrl(account))
+            .method("REPORT", body.toRequestBody("application/xml".toMediaTypeOrNull()))
+            .build()
+        return http.newCall(request).execute().use { response ->
+            if (response.code != 207) throw NextcloudException(response.code, response.message)
+            parseFiles(response.body.byteStream(), account.username)
+        }
+    }
+
+    fun setFavorite(account: Account, path: String, favorite: Boolean) {
+        val body = """<?xml version="1.0"?>
+            <d:propertyupdate $DAV_NAMESPACES>
+              <d:set><d:prop><oc:favorite>${if (favorite) 1 else 0}</oc:favorite></d:prop></d:set>
+            </d:propertyupdate>""".trimIndent()
+        val request = authenticated(account, NextcloudPath.davUrl(account, path))
+            .method("PROPPATCH", body.toRequestBody("application/xml".toMediaTypeOrNull()))
+            .build()
+        http.newCall(request).execute().use { response ->
+            if (response.code != 207) throw NextcloudException(response.code, response.message)
+            failedPropStatus(response.body.string())?.let { throw NextcloudException(it, "Could not change the star") }
+        }
+    }
+
+    /** Finds a file or folder by its stable file ID, wherever it was moved. Null if it no longer exists. */
+    fun findByFileId(account: Account, fileId: String): CloudFile? {
+        val request = authenticated(account, "${NextcloudPath.normalizeServerUrl(account.serverUrl)}/remote.php/dav/")
+            .method("SEARCH", fileIdSearchBody(account.username, fileId).toRequestBody("text/xml".toMediaTypeOrNull()))
+            .build()
+        return http.newCall(request).execute().use { response ->
+            if (response.code != 207) throw NextcloudException(response.code, response.message)
+            parseFiles(response.body.byteStream(), account.username).firstOrNull { it.fileId == fileId }
+        }
     }
 
     fun upload(
@@ -496,6 +546,7 @@ class NextcloudClient(
                     "owner-display-name" -> current.ownerDisplayName = parser.nextText().ifBlank { null }
                     "mount-type" -> current.mountType = parser.nextText().ifBlank { null }
                     "share-type" -> current.shareTypes += parser.nextText().toInt()
+                    "favorite" -> current.favorite = parser.nextText().trim() == "1"
                 }
             } else if (event == XmlPullParser.END_TAG && parser.name.equals("response", true)) {
                 current.toFile(username)?.let(files::add)
@@ -517,6 +568,7 @@ class NextcloudClient(
         var ownerDisplayName: String? = null,
         var mountType: String? = null,
         var shareTypes: Set<Int> = emptySet(),
+        var favorite: Boolean = false,
     ) {
         fun toFile(username: String): CloudFile? {
             val path = href?.let { NextcloudPath.relativePathFromDavHref(it, username) } ?: return null
@@ -534,6 +586,7 @@ class NextcloudClient(
                 ownerDisplayName,
                 mountType,
                 shareTypes,
+                favorite,
             )
         }
     }
@@ -546,6 +599,35 @@ data class ServerNotification(
     val message: String,
     val link: String?,
 )
+
+private const val DAV_NAMESPACES =
+    """xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns""""
+private const val FILE_PROPERTIES = "<d:resourcetype/><d:getcontentlength/><d:getcontenttype/>" +
+    "<d:getlastmodified/><d:getetag/><oc:fileid/><oc:owner-id/><oc:owner-display-name/>" +
+    "<oc:share-types/><nc:mount-type/><oc:favorite/>"
+
+internal fun fileIdSearchBody(username: String, fileId: String): String = """<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest $DAV_NAMESPACES>
+  <d:basicsearch>
+    <d:select><d:prop>$FILE_PROPERTIES</d:prop></d:select>
+    <d:from><d:scope><d:href>/files/${xmlEscape(username)}</d:href><d:depth>infinity</d:depth></d:scope></d:from>
+    <d:where><d:eq><d:prop><oc:fileid/></d:prop><d:literal>${xmlEscape(fileId)}</d:literal></d:eq></d:where>
+    <d:orderby/>
+  </d:basicsearch>
+</d:searchrequest>"""
+
+/** The first non-2xx status inside a WebDAV multistatus body, or null if every property was applied. */
+internal fun failedPropStatus(multistatus: String): Int? =
+    Regex("""<[^>]*status>\s*HTTP/\d(?:\.\d)?\s+(\d{3})""")
+        .findAll(multistatus)
+        .map { it.groupValues[1].toInt() }
+        .firstOrNull { it !in 200..299 }
+
+private fun xmlEscape(value: String) = value
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+    .replace("\"", "&quot;")
 
 class NextcloudException(val statusCode: Int, val serverMessage: String) :
     Exception("Nextcloud returned $statusCode: $serverMessage")

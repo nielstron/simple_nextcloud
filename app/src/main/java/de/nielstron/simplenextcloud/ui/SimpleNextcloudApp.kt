@@ -54,6 +54,7 @@ import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AddToHomeScreen
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Description
@@ -76,7 +77,11 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Star
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -90,6 +95,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -131,11 +138,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import de.nielstron.simplenextcloud.BrowseView
 import de.nielstron.simplenextcloud.FileUiState
 import de.nielstron.simplenextcloud.FileViewModel
 import de.nielstron.simplenextcloud.ClipboardMode
@@ -149,9 +158,13 @@ import de.nielstron.simplenextcloud.data.CloudFile
 import de.nielstron.simplenextcloud.data.ExistingShare
 import de.nielstron.simplenextcloud.data.LinkShareOptions
 import de.nielstron.simplenextcloud.data.NextcloudPath
+import de.nielstron.simplenextcloud.data.RecentAction
+import de.nielstron.simplenextcloud.data.RecentEntry
 import de.nielstron.simplenextcloud.data.ShareUser
 import de.nielstron.simplenextcloud.data.ShareUpdate
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlin.math.ln
@@ -358,12 +371,13 @@ internal fun FilesScreen(
 ) {
     var search by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
+    var settingsOpen by remember { mutableStateOf(false) }
     var breadcrumbMenuOpen by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf<CloudFile?>(null) }
     var pendingDownload by remember { mutableStateOf<CloudFile?>(null) }
     var deleteTarget by remember { mutableStateOf<CloudFile?>(null) }
     var deleteSelection by remember { mutableStateOf<List<CloudFile>>(emptyList()) }
-    var selectedPaths by remember(state.account, state.path) { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedPaths by remember(state.account, state.path, state.view) { mutableStateOf<Set<String>>(emptySet()) }
     val selectedFiles = state.files.filter { it.path in selectedPaths }
     val selecting = selectedPaths.isNotEmpty()
     fun toggleSelection(file: CloudFile) {
@@ -398,8 +412,19 @@ internal fun FilesScreen(
         pendingDownload = null
     }
 
-    BackHandler(enabled = sharedUris.isEmpty() && state.path.isNotEmpty(), onBack = model::up)
+    BackHandler(
+        enabled = state.view == BrowseView.FILES && sharedUris.isEmpty() && state.path.isNotEmpty(),
+        onBack = model::up,
+    )
     BackHandler(enabled = selecting) { selectedPaths = emptySet() }
+    // Shared files usually go where the last ones went: start on the recently used folders.
+    LaunchedEffect(sharedUris) {
+        if (sharedUris.isNotEmpty() && state.recents.any { it.file.isFolder }) {
+            model.showView(BrowseView.RECENT, rememberChoice = false)
+        }
+    }
+    val starredPaths = state.favorites.mapTo(mutableSetOf(), CloudFile::path)
+    val currentFolderStarred = state.path in starredPaths
     LaunchedEffect(state.files, state.loading) {
         if (!state.loading) selectedPaths = selectedPaths.intersect(state.files.map { it.path }.toSet())
     }
@@ -460,9 +485,34 @@ internal fun FilesScreen(
                 )
             } else TopAppBar(
                 title = {
-                    Box {
+                    if (state.view != BrowseView.FILES) Column {
+                        Text(if (state.view == BrowseView.STARRED) "Starred" else "Recent", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            state.account?.serverUrl.orEmpty(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    } else Box {
                         Column(Modifier.clickable { breadcrumbMenuOpen = true }) {
-                            Text(if (state.path.isEmpty()) "All files" else state.path.substringAfterLast('/'), fontWeight = FontWeight.SemiBold)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (state.path.isEmpty()) "All files" else state.path.substringAfterLast('/'),
+                                    Modifier.weight(1f, fill = false),
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (state.path.isNotEmpty() && currentFolderStarred) {
+                                    Icon(
+                                        Icons.Outlined.Star,
+                                        "Starred",
+                                        Modifier.padding(start = 6.dp).size(16.dp),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
                             Text(
                                 if (state.path.isEmpty()) state.account?.serverUrl.orEmpty() else "/${state.path}",
                                 style = MaterialTheme.typography.labelSmall,
@@ -497,8 +547,10 @@ internal fun FilesScreen(
                     )
                 },
                 actions = {
-                    IconButton(onClick = model::refresh) { Icon(Icons.Outlined.Refresh, "Refresh") }
-                    Box {
+                    if (state.view != BrowseView.RECENT) IconButton(
+                        onClick = if (state.view == BrowseView.STARRED) model::loadFavorites else model::refresh,
+                    ) { Icon(Icons.Outlined.Refresh, "Refresh") }
+                    if (state.view != BrowseView.RECENT) Box {
                         IconButton(onClick = { sortMenuOpen = true }) { Icon(Icons.AutoMirrored.Outlined.Sort, "Sort files") }
                         DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
                             DropdownMenuItem(
@@ -518,7 +570,7 @@ internal fun FilesScreen(
                             }
                         }
                     }
-                    if (state.clipboardFiles.isNotEmpty()) {
+                    if (state.view == BrowseView.FILES && state.clipboardFiles.isNotEmpty()) {
                         val canPaste = canPasteFiles(state.clipboardFiles, state.path) && !state.loading
                         Box {
                             IconButton(onClick = { clipboardMenuOpen = true }) {
@@ -562,7 +614,7 @@ internal fun FilesScreen(
                         }
                     }
                     Box {
-                        IconButton(onClick = { menuOpen = true }) {
+                        IconButton(onClick = { settingsOpen = true }) {
                             BadgedBox(
                                 badge = {
                                     if (unfinishedUploadCount > 0) {
@@ -573,13 +625,13 @@ internal fun FilesScreen(
                                 },
                             ) {
                                 Icon(
-                                    Icons.Outlined.MoreVert,
-                                    if (unfinishedUploadCount == 0) "More"
-                                    else "More, $unfinishedUploadCount unfinished uploads",
+                                    Icons.Outlined.Settings,
+                                    if (unfinishedUploadCount == 0) "Settings"
+                                    else "Settings, $unfinishedUploadCount unfinished uploads",
                                 )
                             }
                         }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenu(expanded = settingsOpen, onDismissRequest = { settingsOpen = false }) {
                             DropdownMenuItem(
                                 text = { Text("Show hidden files") },
                                 trailingIcon = {
@@ -602,12 +654,42 @@ internal fun FilesScreen(
                                     )
                                 },
                                 leadingIcon = { Icon(Icons.Outlined.Upload, null) },
-                                onClick = { menuOpen = false; uploadQueueOpen = true },
+                                onClick = { settingsOpen = false; uploadQueueOpen = true },
                             )
                             DropdownMenuItem(
                                 text = { Text("Disconnect") },
                                 leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Logout, null) },
-                                onClick = { menuOpen = false; model.disconnect() },
+                                onClick = { settingsOpen = false; model.disconnect() },
+                            )
+                        }
+                    }
+                    if (state.view == BrowseView.FILES && state.path.isNotEmpty()) Box {
+                        val folder = CloudFile(
+                            state.path.substringAfterLast('/'),
+                            state.path,
+                            isFolder = true,
+                            size = 0,
+                            mimeType = null,
+                            modifiedAt = null,
+                            etag = null,
+                            favorite = currentFolderStarred,
+                        )
+                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Outlined.MoreVert, "Folder options") }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            FileMenuItems(
+                                starred = currentFolderStarred,
+                                close = { menuOpen = false },
+                                onToggleStar = { model.setFavorite(folder.path, !currentFolderStarred) },
+                                onPin = { model.pinFolder(folder.path) },
+                                onDelete = { deleteTarget = folder },
+                                onCopy = { model.stageTransfer(folder, ClipboardMode.COPY) },
+                                onMove = { model.stageTransfer(folder, ClipboardMode.MOVE) },
+                                onRename = { renameTarget = folder },
+                                onShare = { sharing = folder },
+                                onDownload = {
+                                    pendingDownload = folder
+                                    downloadLauncher.launch("${folder.name}.zip")
+                                },
                             )
                         }
                     }
@@ -615,9 +697,14 @@ internal fun FilesScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
+        bottomBar = {
+            if (sharedUris.isNotEmpty() && state.view != BrowseView.FILES) {
+                SharedFilesBar(count = sharedUris.size, onCancel = onSharedUrisConsumed)
+            }
+        },
         floatingActionButton = {
-            if (selecting) {
-                // Keep the file list clear while selecting items.
+            if (selecting || state.view != BrowseView.FILES) {
+                // Keep the list clear while selecting; Starred and Recent have no current folder to add to.
             } else if (sharedUris.isNotEmpty()) {
                 ExtendedFloatingActionButton(
                     onClick = {
@@ -651,74 +738,164 @@ internal fun FilesScreen(
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (state.loading || (state.view == BrowseView.STARRED && state.favoritesLoading)) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                placeholder = { Text("Search this folder") },
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+                placeholder = {
+                    Text(
+                        when (state.view) {
+                            BrowseView.FILES -> "Search this folder"
+                            BrowseView.STARRED -> "Search starred"
+                            BrowseView.RECENT -> "Search recent"
+                        },
+                    )
+                },
                 leadingIcon = { Icon(Icons.Outlined.Search, null) },
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
             )
-            val visibleFiles = state.files
-                .asSequence()
-                .filter { showHiddenFiles || !it.name.startsWith('.') }
-                .filter { it.name.contains(search, ignoreCase = true) }
-                .sortedWith(fileSort.comparator(sortAscending))
-                .toList()
-            LaunchedEffect(state.highlightedPath) {
-                if (state.highlightedPath != null) search = ""
+            ViewChips(selected = state.view, onSelect = model::showView)
+
+            /** A row with the full file menu, for Starred and Recent. */
+            @Composable
+            fun QuickAccessRow(file: CloudFile, subtitle: String, starred: Boolean, showOptions: Boolean = true) {
+                FileRow(
+                    file = file,
+                    highlighted = false,
+                    starred = starred,
+                    subtitle = subtitle,
+                    showOptions = showOptions,
+                    onSelect = null,
+                    onOpen = { if (file.isFolder) model.openFolder(file.path) else model.openFile(file) },
+                    onToggleStar = { model.setFavorite(file.path, !starred) },
+                    onPin = if (file.isFolder) ({ model.pinFolder(file.path) }) else null,
+                    onDelete = { deleteTarget = file },
+                    onCopy = { model.stageTransfer(file, ClipboardMode.COPY) },
+                    onMove = { model.stageTransfer(file, ClipboardMode.MOVE) },
+                    onRename = { renameTarget = file },
+                    onShare = { sharing = file },
+                    onDownload = {
+                        pendingDownload = file
+                        downloadLauncher.launch(if (file.isFolder) "${file.name}.zip" else file.name)
+                    },
+                )
+                HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
             }
-            val highlightedIndex = visibleFiles.indexOfFirst { it.path == state.highlightedPath }
-            if (highlightedIndex >= 0) {
-                LaunchedEffect(state.highlightedPath, highlightedIndex) {
-                    fileListState.animateScrollToItem(highlightedIndex + if (state.path.isEmpty()) 0 else 1)
-                    delay(3_000)
-                    model.clearHighlight()
-                }
-            }
-            if (!state.loading && visibleFiles.isEmpty() && state.path.isEmpty()) {
-                EmptyFolder(if (search.isBlank()) "This folder is empty" else "No matching files")
-            } else {
-                LazyColumn(
-                    state = fileListState,
-                    contentPadding = PaddingValues(bottom = if (actionsExpanded) 224.dp else 96.dp),
-                ) {
-                    if (state.path.isNotEmpty()) {
-                        item(key = "parent-folder") {
-                            ParentFolderRow(onOpen = model::up)
-                            HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
+
+            when (state.view) {
+                BrowseView.STARRED -> {
+                    val starred = state.favorites
+                        .asSequence()
+                        .filter { showHiddenFiles || !it.name.startsWith('.') }
+                        .filter { it.name.contains(search, ignoreCase = true) }
+                        .sortedWith(fileSort.comparator(sortAscending))
+                        .toList()
+                    if (starred.isEmpty() && !state.favoritesLoading) {
+                        EmptyFolder(
+                            if (search.isBlank()) "Nothing starred yet. Star files and folders from their menu."
+                            else "No matching files",
+                        )
+                    } else LazyColumn(contentPadding = PaddingValues(bottom = 96.dp)) {
+                        items(starred, key = { it.path }) { file ->
+                            QuickAccessRow(file, locationSubtitle(file), starred = true)
                         }
                     }
-                    items(visibleFiles, key = { it.path }) { file ->
-                        val download = fun() {
-                            pendingDownload = file
-                            downloadLauncher.launch(if (file.isFolder) "${file.name}.zip" else file.name)
-                        }
-                        FileRow(
-                            file = file,
-                            highlighted = file.path == state.highlightedPath,
-                            selecting = selecting,
-                            selected = file.path in selectedPaths,
-                            onSelect = { toggleSelection(file) },
-                            onOpen = {
-                                when {
-                                    selecting -> toggleSelection(file)
-                                    file.isFolder -> model.open(file)
-                                    file.mimeType?.let { it.startsWith("image/") || it.startsWith("video/") } == true ->
-                                        model.showPreview(file)
-                                    else -> model.openLocally(file)
-                                }
-                            },
-                            onDelete = { deleteTarget = file },
-                            onCopy = { model.stageTransfer(file, ClipboardMode.COPY) },
-                            onMove = { model.stageTransfer(file, ClipboardMode.MOVE) },
-                            onRename = { renameTarget = file },
-                            onShare = { sharing = file },
-                            onDownload = download,
+                }
+                BrowseView.RECENT -> {
+                    val placing = sharedUris.isNotEmpty()
+                    val now = System.currentTimeMillis()
+                    val recents = state.recents
+                        .filter { it.file.name.contains(search, ignoreCase = true) }
+                        .filter { !placing || it.file.isFolder }
+                    val (folders, recentFiles) = recents.partition { it.file.isFolder }
+                    if (recents.isEmpty()) {
+                        EmptyFolder(
+                            if (search.isBlank()) "Folders and files you open or upload to appear here."
+                            else "No matching files",
                         )
-                        HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    } else LazyColumn(contentPadding = PaddingValues(bottom = 96.dp)) {
+                        if (folders.isNotEmpty()) item(key = "folders-header") {
+                            SectionHeader(if (placing) "Last used folders" else "Folders")
+                        }
+                        items(folders, key = { "folder:${it.file.path}" }) { entry ->
+                            QuickAccessRow(
+                                entry.file,
+                                recentSubtitle(entry, now),
+                                starred = entry.file.path in starredPaths,
+                                showOptions = !placing,
+                            )
+                        }
+                        if (recentFiles.isNotEmpty()) item(key = "files-header") { SectionHeader("Files") }
+                        items(recentFiles, key = { "file:${it.file.path}" }) { entry ->
+                            QuickAccessRow(entry.file, recentSubtitle(entry, now), starred = entry.file.path in starredPaths)
+                        }
+                    }
+                }
+                BrowseView.FILES -> {
+                    val visibleFiles = state.files
+                        .asSequence()
+                        .filter { showHiddenFiles || !it.name.startsWith('.') }
+                        .filter { it.name.contains(search, ignoreCase = true) }
+                        .sortedWith(fileSort.comparator(sortAscending))
+                        .toList()
+                    LaunchedEffect(state.highlightedPath) {
+                        if (state.highlightedPath != null) search = ""
+                    }
+                    val highlightedIndex = visibleFiles.indexOfFirst { it.path == state.highlightedPath }
+                    if (highlightedIndex >= 0) {
+                        LaunchedEffect(state.highlightedPath, highlightedIndex) {
+                            fileListState.animateScrollToItem(highlightedIndex + if (state.path.isEmpty()) 0 else 1)
+                            delay(3_000)
+                            model.clearHighlight()
+                        }
+                    }
+                    if (!state.loading && visibleFiles.isEmpty() && state.path.isEmpty()) {
+                        EmptyFolder(if (search.isBlank()) "This folder is empty" else "No matching files")
+                    } else {
+                        LazyColumn(
+                            state = fileListState,
+                            contentPadding = PaddingValues(bottom = if (actionsExpanded) 224.dp else 96.dp),
+                        ) {
+                            if (state.path.isNotEmpty()) {
+                                item(key = "parent-folder") {
+                                    ParentFolderRow(onOpen = model::up)
+                                    HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                                }
+                            }
+                            items(visibleFiles, key = { it.path }) { file ->
+                                val download = fun() {
+                                    pendingDownload = file
+                                    downloadLauncher.launch(if (file.isFolder) "${file.name}.zip" else file.name)
+                                }
+                                FileRow(
+                                    file = file,
+                                    highlighted = file.path == state.highlightedPath,
+                                    selecting = selecting,
+                                    selected = file.path in selectedPaths,
+                                    onSelect = { toggleSelection(file) },
+                                    onOpen = {
+                                        when {
+                                            selecting -> toggleSelection(file)
+                                            file.isFolder -> model.open(file)
+                                            else -> model.openFile(file)
+                                        }
+                                    },
+                                    onToggleStar = { model.setFavorite(file.path, !file.favorite) },
+                                    onPin = if (file.isFolder) ({ model.pinFolder(file.path) }) else null,
+                                    onDelete = { deleteTarget = file },
+                                    onCopy = { model.stageTransfer(file, ClipboardMode.COPY) },
+                                    onMove = { model.stageTransfer(file, ClipboardMode.MOVE) },
+                                    onRename = { renameTarget = file },
+                                    onShare = { sharing = file },
+                                    onDownload = download,
+                                )
+                                HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                        }
                     }
                 }
             }
@@ -727,7 +904,8 @@ internal fun FilesScreen(
 
     state.previewFile?.let { file ->
         FullScreenImagePreview(
-            files = previewableFiles(state.files),
+            // A file opened from Starred or Recent may not be in the current folder: show it alone.
+            files = previewableFiles(state.files).takeIf { list -> list.any { it.path == file.path } } ?: listOf(file),
             currentFile = file,
             account = requireNotNull(state.account),
             bytes = state.previewBytes,
@@ -921,8 +1099,13 @@ internal fun FileRow(
     highlighted: Boolean,
     selecting: Boolean = false,
     selected: Boolean = false,
-    onSelect: () -> Unit,
+    starred: Boolean = file.favorite,
+    subtitle: String? = null,
+    showOptions: Boolean = true,
+    onSelect: (() -> Unit)?,
     onOpen: () -> Unit,
+    onToggleStar: () -> Unit = {},
+    onPin: (() -> Unit)? = null,
     onDelete: () -> Unit,
     onCopy: () -> Unit,
     onMove: () -> Unit,
@@ -938,7 +1121,11 @@ internal fun FileRow(
                 if (selected || highlighted) MaterialTheme.colorScheme.primaryContainer
                 else Color.Transparent,
             )
-            .combinedClickable(onClick = onOpen, onLongClick = onSelect, onLongClickLabel = "Select ${file.name}")
+            .combinedClickable(
+                onClick = onOpen,
+                onLongClick = onSelect,
+                onLongClickLabel = onSelect?.let { "Select ${file.name}" },
+            )
             .padding(start = 18.dp, top = 12.dp, bottom = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -964,31 +1151,75 @@ internal fun FileRow(
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
             Text(
-                when {
+                subtitle ?: when {
                     file.isIncomingShare -> "Shared by ${file.ownerDisplayName ?: file.ownerId ?: "another user"}"
                     file.isFolder -> "Folder"
                     else -> listOf(formatSize(file.size), formatDate(file.modifiedAt)).filter(String::isNotBlank).joinToString(" · ")
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (starred) {
+            Icon(
+                Icons.Outlined.Star,
+                "Starred",
+                Modifier.padding(start = 4.dp).size(18.dp),
+                tint = MaterialTheme.colorScheme.primary,
             )
         }
         if (selecting) {
-            Checkbox(checked = selected, onCheckedChange = { onSelect() })
+            Checkbox(checked = selected, onCheckedChange = { onSelect?.invoke() })
+        } else if (!showOptions) {
+            Spacer(Modifier.size(12.dp))
         } else Box {
             IconButton(onClick = { optionsOpen = true }, modifier = Modifier.size(42.dp)) {
                 Icon(Icons.Outlined.MoreVert, "Options for ${file.name}")
             }
             DropdownMenu(expanded = optionsOpen, onDismissRequest = { optionsOpen = false }) {
-                FileMenuItem("Delete", Icons.Outlined.Delete) { optionsOpen = false; onDelete() }
-                FileMenuItem("Copy", Icons.Outlined.ContentCopy) { optionsOpen = false; onCopy() }
-                FileMenuItem("Move", Icons.AutoMirrored.Outlined.DriveFileMove) { optionsOpen = false; onMove() }
-                FileMenuItem("Rename", Icons.Outlined.Edit) { optionsOpen = false; onRename() }
-                FileMenuItem("Share", Icons.Outlined.Share) { optionsOpen = false; onShare() }
-                FileMenuItem("Download", Icons.Outlined.Download) { optionsOpen = false; onDownload() }
+                FileMenuItems(
+                    starred = starred,
+                    close = { optionsOpen = false },
+                    onToggleStar = onToggleStar,
+                    onPin = onPin,
+                    onDelete = onDelete,
+                    onCopy = onCopy,
+                    onMove = onMove,
+                    onRename = onRename,
+                    onShare = onShare,
+                    onDownload = onDownload,
+                )
             }
         }
     }
+}
+
+/** The actions for one file or folder, shared by its row menu and, for the open folder, the top bar. */
+@Composable
+private fun FileMenuItems(
+    starred: Boolean,
+    close: () -> Unit,
+    onToggleStar: () -> Unit,
+    onPin: (() -> Unit)?,
+    onDelete: () -> Unit,
+    onCopy: () -> Unit,
+    onMove: () -> Unit,
+    onRename: () -> Unit,
+    onShare: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    if (starred) FileMenuItem("Unstar", Icons.Outlined.Star) { close(); onToggleStar() }
+    else FileMenuItem("Star", Icons.Outlined.StarBorder) { close(); onToggleStar() }
+    onPin?.let { pin -> FileMenuItem("Add to home screen", Icons.Outlined.AddToHomeScreen) { close(); pin() } }
+    HorizontalDivider()
+    FileMenuItem("Delete", Icons.Outlined.Delete) { close(); onDelete() }
+    FileMenuItem("Copy", Icons.Outlined.ContentCopy) { close(); onCopy() }
+    FileMenuItem("Move", Icons.AutoMirrored.Outlined.DriveFileMove) { close(); onMove() }
+    FileMenuItem("Rename", Icons.Outlined.Edit) { close(); onRename() }
+    FileMenuItem("Share", Icons.Outlined.Share) { close(); onShare() }
+    FileMenuItem("Download", Icons.Outlined.Download) { close(); onDownload() }
 }
 
 @Composable
@@ -1860,11 +2091,112 @@ private fun defaultSharePermissions(isFolder: Boolean, isLink: Boolean): Int =
 
 @Composable
 private fun EmptyFolder(message: String) {
-    Box(Modifier.fillMaxSize().padding(bottom = 100.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().padding(start = 32.dp, end = 32.dp, bottom = 100.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(Icons.Outlined.Folder, null, Modifier.size(52.dp), tint = MaterialTheme.colorScheme.outline)
-            Text(message, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                message,
+                Modifier.padding(top = 12.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
+    }
+}
+
+@Composable
+private fun ViewChips(selected: BrowseView, onSelect: (BrowseView) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf(
+            Triple(BrowseView.FILES, "Files", Icons.Outlined.Folder),
+            Triple(BrowseView.STARRED, "Starred", if (selected == BrowseView.STARRED) Icons.Outlined.Star else Icons.Outlined.StarBorder),
+            Triple(BrowseView.RECENT, "Recent", Icons.Outlined.Schedule),
+        ).forEach { (view, label, icon) ->
+            FilterChip(
+                selected = view == selected,
+                onClick = { onSelect(view) },
+                label = { Text(label) },
+                leadingIcon = { Icon(icon, null, Modifier.size(18.dp)) },
+                // The theme defines no secondary colors, so the default selected chip would be lavender.
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(label: String) {
+    Text(
+        label,
+        Modifier.padding(start = 18.dp, top = 12.dp, bottom = 4.dp),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun SharedFilesBar(count: Int, onCancel: () -> Unit) {
+    Surface(
+        Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+        RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            Modifier.padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Outlined.Upload, null)
+            Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
+                Text(
+                    if (count == 1) "1 file to upload" else "$count files to upload",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    if (count == 1) "Open a folder to place it" else "Open a folder to place them",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        }
+    }
+}
+
+/** Where a starred item lives, plus its size for files. */
+internal fun locationSubtitle(file: CloudFile): String {
+    val place = file.path.substringBeforeLast('/', "").ifEmpty { "All files" }
+    return if (file.isFolder) place else "$place · ${formatSize(file.size)}"
+}
+
+internal fun recentSubtitle(entry: RecentEntry, nowMillis: Long, zone: ZoneId = ZoneId.systemDefault()): String {
+    val place = entry.file.path.substringBeforeLast('/', "").ifEmpty { "All files" }
+    val verb = when {
+        entry.action == RecentAction.OPENED -> "opened"
+        entry.file.isFolder -> "uploaded here"
+        else -> "uploaded"
+    }
+    return "$place · $verb ${relativeTime(entry.at, nowMillis, zone)}"
+}
+
+internal fun relativeTime(atMillis: Long, nowMillis: Long, zone: ZoneId): String {
+    val elapsedMinutes = (nowMillis - atMillis) / 60_000
+    val day = Instant.ofEpochMilli(atMillis).atZone(zone).toLocalDate()
+    val today = Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
+    return when {
+        elapsedMinutes < 1 -> "just now"
+        elapsedMinutes < 60 -> "$elapsedMinutes min ago"
+        day == today -> "${elapsedMinutes / 60} h ago"
+        day == today.minusDays(1) -> "yesterday"
+        day.year == today.year -> day.format(DateTimeFormatter.ofPattern("d MMM"))
+        else -> day.format(DateTimeFormatter.ofPattern("d MMM yyyy"))
     }
 }
 
@@ -1877,7 +2209,7 @@ private fun fileIcon(file: CloudFile): ImageVector = when {
     else -> Icons.AutoMirrored.Outlined.InsertDriveFile
 }
 
-private fun formatSize(bytes: Long): String {
+internal fun formatSize(bytes: Long): String {
     if (bytes < 1_000) return "$bytes B"
     val unit = (ln(bytes.toDouble()) / ln(1_000.0)).toInt().coerceAtMost(4)
     return "%.1f %sB".format(bytes / 1_000.0.pow(unit), "kMGT"[unit - 1])
