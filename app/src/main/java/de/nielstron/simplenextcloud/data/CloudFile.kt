@@ -13,6 +13,7 @@ data class CloudFile(
     val ownerDisplayName: String? = null,
     val mountType: String? = null,
     val shareTypes: Set<Int> = emptySet(),
+    val favorite: Boolean = false,
 ) {
     val isIncomingShare: Boolean get() = isFolder && mountType == "shared"
 }

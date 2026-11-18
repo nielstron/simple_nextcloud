@@ -2,6 +2,7 @@ package de.nielstron.simplenextcloud
 
 import android.app.Application
 import android.content.ContentResolver
+import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.DocumentsContract
@@ -13,12 +14,17 @@ import de.nielstron.simplenextcloud.data.Account
 import de.nielstron.simplenextcloud.data.AccountStore
 import de.nielstron.simplenextcloud.data.CloudFile
 import de.nielstron.simplenextcloud.data.ExistingShare
+import de.nielstron.simplenextcloud.data.FavoritesStore
 import de.nielstron.simplenextcloud.data.FolderListingCache
 import de.nielstron.simplenextcloud.data.LinkShareOptions
 import de.nielstron.simplenextcloud.data.ImagePreviewCache
 import de.nielstron.simplenextcloud.data.NextcloudClient
 import de.nielstron.simplenextcloud.data.NextcloudException
 import de.nielstron.simplenextcloud.data.NextcloudPath
+import de.nielstron.simplenextcloud.data.RecentAction
+import de.nielstron.simplenextcloud.data.RecentEntry
+import de.nielstron.simplenextcloud.data.RecentStore
+import de.nielstron.simplenextcloud.data.rebasePath
 import de.nielstron.simplenextcloud.data.ShareUser
 import de.nielstron.simplenextcloud.data.ShareHistoryStore
 import de.nielstron.simplenextcloud.data.persistentFolderListingCache
@@ -80,8 +86,13 @@ data class FileUiState(
     /** An http:// address waiting for the user to confirm connecting without encryption. */
     val insecureHttpPrompt: String? = null,
     val notificationsEnabled: Boolean = false,
+    val view: BrowseView = BrowseView.FILES,
+    val favorites: List<CloudFile> = emptyList(),
+    val favoritesLoading: Boolean = false,
+    val recents: List<RecentEntry> = emptyList(),
 )
 
+enum class BrowseView { FILES, STARRED, RECENT }
 enum class ClipboardMode { COPY, MOVE }
 enum class UploadStatus { QUEUED, UPLOADING, COMPLETED, FAILED }
 data class UploadQueueItem(
@@ -100,6 +111,9 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     private val client = NextcloudClient(trustedCertificates.client)
     private var certificateRetry: (() -> Unit)? = null
     private val shareHistory = ShareHistoryStore(application)
+    private val recentStore = RecentStore(application)
+    private val favoritesStore = FavoritesStore(application)
+    private val preferences = application.getSharedPreferences("ui", Context.MODE_PRIVATE)
     private val initialAccount = store.load()
     private var folderCache = initialAccount?.let {
         persistentFolderListingCache(application, it)
@@ -123,8 +137,17 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     val state = _state.asStateFlow()
 
     init {
-        if (_state.value.account != null) {
+        val account = _state.value.account
+        if (account != null) {
+            _state.update {
+                it.copy(
+                    view = BrowseView.valueOf(preferences.getString(VIEW_PREFERENCE, BrowseView.FILES.name)!!),
+                    favorites = favoritesStore.get(account),
+                    recents = recentStore.list(account),
+                )
+            }
             refresh()
+            loadFavorites()
         } else {
             store.loadPendingLogin()?.let { pendingLogin ->
                 _state.update { it.copy(loginWaiting = true) }
@@ -240,6 +263,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { failure ->
                     _state.update { it.copy(loading = false, error = failure.userMessage()) }
                 }
+        loadFavorites()
     }
 
     fun confirmInsecureHttp() {
@@ -298,6 +322,11 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         folderCache.clear()
         imagePreviewCache?.clear()
         imagePreviewCache = null
+        _state.value.account?.let { account ->
+            recentStore.clear(account)
+            favoritesStore.clear(account)
+        }
+        FolderShortcuts.clearDynamic(getApplication())
         store.clear()
         trustedCertificates.clear()
         ServerNotifications.setEnabled(getApplication(), false)
@@ -324,7 +353,11 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(highlightedPath = child) }
     }
 
-    fun loadPath(path: String) {
+    /**
+     * [onNotFound] replaces the error shown when the folder no longer exists. A refresh is not a visit,
+     * so [recordVisit] keeps it from overwriting, say, an upload as the folder's latest recent use.
+     */
+    fun loadPath(path: String, onNotFound: (() -> Unit)? = null, recordVisit: Boolean = true) {
         val account = _state.value.account ?: return
         val normalizedPath = path.trim('/')
         prefetchJob?.cancel()
@@ -351,24 +384,215 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                         _state.update { it.copy(files = sorted, loading = false) }
                         if (cached?.files != sorted) schedulePrefetch(account, sorted)
                     }
+                    if (recordVisit && normalizedPath.isNotEmpty()) {
+                        recordRecent(account, knownFolder(normalizedPath, previousFiles), RecentAction.OPENED)
+                    }
                 }
                 .onFailure { failure ->
+                    val notFound = failure is NextcloudException && failure.statusCode == 404
+                    if (notFound) forgetTree(account, normalizedPath)
                     if (_state.value.path == normalizedPath) {
                         _state.update {
                             it.copy(
                                 path = if (cached == null) previousPath else normalizedPath,
                                 files = cached?.files ?: previousFiles,
                                 loading = false,
-                                error = failure.userMessage(),
+                                error = if (notFound && onNotFound != null) it.error else failure.userMessage(),
                             )
                         }
                         promptForCertificate(failure, account.serverUrl, ::refresh)
                     }
+                    if (notFound) onNotFound?.invoke()
                 }
         }
     }
 
-    fun refresh() = loadPath(_state.value.path)
+    fun refresh() = loadPath(_state.value.path, recordVisit = false)
+
+    /** Switches between Files, Starred and Recent. Only a deliberate switch is remembered for the next start. */
+    fun showView(view: BrowseView, rememberChoice: Boolean = true) {
+        if (rememberChoice) preferences.edit().putString(VIEW_PREFERENCE, view.name).apply()
+        val account = _state.value.account
+        _state.update { it.copy(view = view, recents = account?.let(recentStore::list) ?: it.recents) }
+        if (view == BrowseView.STARRED) loadFavorites()
+    }
+
+    /** Opens a folder picked from Starred or Recent in the Files view. */
+    fun openFolder(path: String) {
+        showView(BrowseView.FILES, rememberChoice = false)
+        clearHighlight()
+        loadPath(path)
+    }
+
+    /** Opens a file from any list: images and videos in the viewer, everything else in another app. */
+    fun openFile(file: CloudFile) {
+        val account = _state.value.account ?: return
+        recordRecent(account, file, RecentAction.OPENED)
+        if (file.mimeType?.let { it.startsWith("image/") || it.startsWith("video/") } == true) showPreview(file)
+        else openLocally(file)
+    }
+
+    fun loadFavorites() {
+        val account = _state.value.account ?: return
+        _state.update { it.copy(favoritesLoading = true) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    client.favorites(account).sortedFiles().also { favorites ->
+                        favoritesStore.put(account, favorites)
+                        FolderShortcuts.publishStarred(getApplication(), account, favorites)
+                    }
+                }
+            }.onSuccess { favorites ->
+                if (_state.value.account == account) {
+                    _state.update { it.copy(favorites = favorites, favoritesLoading = false) }
+                }
+            }.onFailure { failure ->
+                // Starred falls back to the last fetched list; only complain while it is on screen.
+                _state.update {
+                    it.copy(
+                        favoritesLoading = false,
+                        error = if (it.view == BrowseView.STARRED) failure.userMessage() else it.error,
+                    )
+                }
+            }
+        }
+    }
+
+    fun setFavorite(path: String, favorite: Boolean) {
+        val account = _state.value.account ?: return
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { client.setFavorite(account, path, favorite) } }
+                .onSuccess {
+                    val parent = path.substringBeforeLast('/', "")
+                    folderCache.get(parent)?.let { entry -> folderCache.put(parent, entry.files.withFavorite(path, favorite)) }
+                    _state.update { state ->
+                        state.copy(
+                            files = state.files.withFavorite(path, favorite),
+                            favorites = if (favorite) state.favorites else state.favorites.filterNot { it.path == path },
+                        )
+                    }
+                    loadFavorites()
+                }
+                .onFailure { failure -> _state.update { it.copy(error = failure.userMessage()) } }
+        }
+    }
+
+    /** Asks the launcher to pin a shortcut to the folder at [path]. */
+    fun pinFolder(path: String) {
+        val account = _state.value.account ?: return
+        val state = _state.value
+        val known = (state.files + state.favorites + state.recents.map(RecentEntry::file))
+            .firstOrNull { it.path == path && it.isFolder && it.fileId != null }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    FolderShortcuts.pin(getApplication(), account, known ?: client.stat(account, path))
+                }
+            }.onSuccess { supported ->
+                if (!supported) _state.update { it.copy(error = "Your launcher does not support pinned shortcuts.") }
+            }.onFailure { failure -> _state.update { it.copy(error = failure.userMessage()) } }
+        }
+    }
+
+    /** Handles a launcher shortcut or widget tap. */
+    fun handleQuickAccess(request: QuickAccessRequest) {
+        val account = _state.value.account
+        if (account == null || !request.belongsTo(account)) {
+            _state.update {
+                it.copy(
+                    error = "This shortcut belongs to ${request.username} on ${request.serverUrl}. " +
+                        "Log in to that account to use it.",
+                )
+            }
+            return
+        }
+        when (request) {
+            is QuickAccessRequest.OpenFolder -> openFolderTarget(account, request)
+            is QuickAccessRequest.OpenFile -> openFile(request.file)
+            is QuickAccessRequest.ShowView -> showView(request.view, rememberChoice = false)
+        }
+    }
+
+    /**
+     * Shows the folder at its last known path at once, then checks by file ID that it is still the same
+     * folder. If it was moved or renamed, follows it and updates its shortcut; if it is gone, disables it.
+     */
+    private fun openFolderTarget(account: Account, target: QuickAccessRequest.OpenFolder) {
+        val pathBefore = _state.value.path
+        val fileId = target.fileId
+        showView(BrowseView.FILES, rememberChoice = false)
+        clearHighlight()
+        if (fileId == null) {
+            loadPath(target.path)
+            return
+        }
+        loadPath(target.path, onNotFound = {})
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val atHint = try {
+                        client.stat(account, target.path)
+                    } catch (failure: NextcloudException) {
+                        if (failure.statusCode != 404) throw failure
+                        null
+                    }
+                    if (atHint?.fileId == fileId) atHint else client.findByFileId(account, fileId)
+                }
+            }.onSuccess { folder ->
+                val stillThere = _state.value.path == target.path || _state.value.path == pathBefore
+                val name = target.path.substringAfterLast('/')
+                when {
+                    folder == null -> {
+                        FolderShortcuts.disable(getApplication(), account, fileId, name)
+                        forgetTree(account, target.path)
+                        folderCache.remove(target.path)
+                        if (stillThere) {
+                            // Do not leave the person looking at the gone folder's cached contents.
+                            loadPath("")
+                            _state.update { it.copy(error = "“$name” no longer exists, so its shortcut was disabled.") }
+                        }
+                    }
+                    folder.path != target.path -> {
+                        pathChanged(account, target.path, folder.path)
+                        if (stillThere) loadPath(folder.path)
+                    }
+                }
+            }
+            // A failed check (for example offline) leaves the folder as shown; loadPath reports the error.
+        }
+    }
+
+    private fun knownFolder(path: String, candidates: List<CloudFile>): CloudFile {
+        val state = _state.value
+        return candidates.firstOrNull { it.path == path }
+            ?: state.recents.firstOrNull { it.file.path == path }?.file
+            ?: state.favorites.firstOrNull { it.path == path }
+            ?: CloudFile(path.substringAfterLast('/'), path, true, 0, null, null, null)
+    }
+
+    private fun recordRecent(account: Account, file: CloudFile, action: RecentAction) {
+        recentStore.record(account, file, action)
+        updateRecents(account)
+    }
+
+    private fun forgetTree(account: Account, path: String) {
+        recentStore.removeTree(account, path)
+        updateRecents(account)
+        if (_state.value.favorites.any { rebasePath(it.path, path, path) != null }) loadFavorites()
+    }
+
+    /** Keeps recents, shortcuts and stars pointing at a file or folder that was renamed or moved. */
+    private fun pathChanged(account: Account, oldPath: String, newPath: String) {
+        recentStore.rebase(account, oldPath, newPath)
+        FolderShortcuts.rebase(getApplication(), account, oldPath, newPath)
+        updateRecents(account)
+        if (_state.value.favorites.any { rebasePath(it.path, oldPath, oldPath) != null }) loadFavorites()
+    }
+
+    private fun updateRecents(account: Account) {
+        if (_state.value.account == account) _state.update { it.copy(recents = recentStore.list(account)) }
+    }
 
     fun enqueueFiles(resolver: ContentResolver, uris: List<Uri>) {
         val targetFolder = _state.value.path
@@ -710,17 +934,27 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     fun delete(file: CloudFile) = mutateAndRefresh(
         message = "${file.name} deleted",
+        followTo = file.path.substringBeforeLast('/', "").takeIf { file.path == _state.value.path },
+        onSuccess = { _state.value.account?.let { forgetTree(it, file.path) } },
         stateOnSuccess = { state ->
             if (state.previewFile?.path == file.path) state.withoutPreview() else state
         },
     ) { account -> client.delete(account, file) }
 
-    fun delete(files: List<CloudFile>) = mutateFiles(files, "deleted") { account, file ->
+    fun delete(files: List<CloudFile>) = mutateFiles(
+        files,
+        "deleted",
+        onCompleted = { result ->
+            _state.value.account?.let { account -> result.completed.forEach { forgetTree(account, it.path) } }
+        },
+    ) { account, file ->
         client.delete(account, file)
     }
 
     fun rename(file: CloudFile, newName: String) = mutateAndRefresh(
         message = "Renamed to $newName",
+        followTo = file.renamedTo(newName).path.takeIf { file.path == _state.value.path },
+        onSuccess = { _state.value.account?.let { pathChanged(it, file.path, file.renamedTo(newName).path) } },
         failureMessage = { renameFailureMessage(newName, it) },
         stateOnSuccess = { state ->
             if (state.previewFile?.path == file.path) {
@@ -764,6 +998,9 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
             files = files,
             verb = if (mode == ClipboardMode.COPY) "copied" else "moved",
             onCompleted = { result ->
+                if (mode == ClipboardMode.MOVE) _state.value.account?.let { account ->
+                    result.completed.forEach { pathChanged(account, it.path, NextcloudPath.child(destination, it.name)) }
+                }
                 _state.update { state ->
                     if (state.clipboardFiles == files && state.clipboardMode == mode) {
                         val remaining = result.failures.map { it.first }
@@ -830,8 +1067,13 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * Runs [mutation], then reloads the current folder. If the mutation renamed or deleted the current
+     * folder itself, [followTo] is where to go instead: its new path, or its parent.
+     */
     private fun mutateAndRefresh(
         message: String,
+        followTo: String? = null,
         onSuccess: () -> Unit = {},
         failureMessage: (Throwable) -> String = Throwable::userMessage,
         stateOnSuccess: (FileUiState) -> FileUiState = { it },
@@ -839,6 +1081,7 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         val account = _state.value.account ?: return
         val currentPath = _state.value.path
+        val listedPath = followTo ?: currentPath
         pendingMutationCount += 1
         _state.update { it.copy(loading = true) }
         viewModelScope.launch {
@@ -846,15 +1089,17 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching {
                     withContext(Dispatchers.IO) {
                         mutation(account)
-                        client.list(account, currentPath)
+                        client.list(account, listedPath)
                     }
                 }.onSuccess { files ->
                     val sorted = files.sortedFiles()
-                    folderCache.put(currentPath, sorted)
+                    if (listedPath != currentPath) folderCache.remove(currentPath)
+                    folderCache.put(listedPath, sorted)
                     _state.update { state ->
                         stateOnSuccess(
                             state.copy(
-                                files = if (state.path == currentPath) sorted else state.files,
+                                path = if (state.path == currentPath) listedPath else state.path,
+                                files = if (state.path == currentPath || state.path == listedPath) sorted else state.files,
                                 message = message,
                             ),
                         )
@@ -907,6 +1152,9 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }.onSuccess {
                     updateUpload(job.item.id, UploadStatus.COMPLETED)
+                    if (job.item.targetPath.isNotEmpty()) {
+                        recordRecent(account, knownFolder(job.item.targetPath, _state.value.files), RecentAction.UPLOADED)
+                    }
                     if (_state.value.path == job.item.targetPath) refresh()
                 }.onFailure { failure ->
                     val nextRetry = nextAutomaticUploadRetry(job.automaticRetries, failure)
@@ -1009,10 +1257,14 @@ class FileViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val USER_SEARCH_DEBOUNCE_MILLIS = 250L
+        const val VIEW_PREFERENCE = "view"
     }
 }
 
-private fun List<CloudFile>.sortedFiles() = sortedWith(compareByDescending<CloudFile> { it.isFolder }.thenBy { it.name.lowercase() })
+private fun List<CloudFile>.withFavorite(path: String, favorite: Boolean) =
+    map { if (it.path == path) it.copy(favorite = favorite) else it }
+
+internal fun List<CloudFile>.sortedFiles() = sortedWith(compareByDescending<CloudFile> { it.isFolder }.thenBy { it.name.lowercase() })
 internal fun Throwable.userMessage(): String = when (this) {
     is NextcloudException -> when (statusCode) {
         400 -> specificServerMessage("Nextcloud rejected the request. Check the entered values and try again.")

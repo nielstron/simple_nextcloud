@@ -26,6 +26,7 @@ import de.nielstron.simplenextcloud.data.NextcloudPath
 import de.nielstron.simplenextcloud.data.isLocalNetworkAddress
 import de.nielstron.simplenextcloud.ui.SimpleNextcloudApp
 import de.nielstron.simplenextcloud.ui.SimpleNextcloudTheme
+import de.nielstron.simplenextcloud.widget.QuickAccessWidgetReceiver
 import java.net.InetAddress
 import java.net.URI
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +72,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         bindLoginTabs()
         receiveShareIntent(intent)
+        // On recreation (rotation, process restore) the intent was already handled.
+        if (savedInstanceState == null) QuickAccessIntents.parse(intent)?.let(model::handleQuickAccess)
         setContent {
             SimpleNextcloudTheme {
                 val state by model.state.collectAsStateWithLifecycle()
@@ -106,6 +109,13 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         receiveShareIntent(intent)
+        QuickAccessIntents.parse(intent)?.let(model::handleQuickAccess)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Widgets are only visible while the app is not: redraw them with the latest recents and stars.
+        QuickAccessWidgetReceiver.requestUpdate(this)
     }
 
     override fun onDestroy() {

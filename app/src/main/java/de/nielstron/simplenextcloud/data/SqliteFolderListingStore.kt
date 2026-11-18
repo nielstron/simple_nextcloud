@@ -165,7 +165,7 @@ fun persistentFolderListingCache(context: Context, account: Account): FolderList
 internal fun encodeFolderListing(files: List<CloudFile>): ByteArray {
     val output = ByteArrayOutputStream()
     GZIPOutputStream(output).bufferedWriter().use { writer ->
-        writer.write(JSONArray(files.map(::encodeFile)).toString())
+        writer.write(JSONArray(files.map(::encodeCloudFile)).toString())
     }
     return output.toByteArray()
 }
@@ -174,7 +174,11 @@ internal fun decodeFolderListing(bytes: ByteArray): List<CloudFile> = GZIPInputS
     .bufferedReader()
     .use { reader -> decodeFiles(JSONArray(reader.readText())) }
 
-private fun encodeFile(file: CloudFile) = JSONObject()
+internal fun encodeCloudFiles(files: List<CloudFile>): String = JSONArray(files.map(::encodeCloudFile)).toString()
+
+internal fun decodeCloudFiles(json: String): List<CloudFile> = decodeFiles(JSONArray(json))
+
+internal fun encodeCloudFile(file: CloudFile): JSONObject = JSONObject()
     .put("name", file.name)
     .put("path", file.path)
     .put("folder", file.isFolder)
@@ -187,8 +191,11 @@ private fun encodeFile(file: CloudFile) = JSONObject()
     .putNullable("ownerDisplayName", file.ownerDisplayName)
     .putNullable("mountType", file.mountType)
     .put("shareTypes", JSONArray(file.shareTypes.toList()))
+    .put("favorite", file.favorite)
 
-private fun decodeFiles(files: JSONArray): List<CloudFile> = files.objects().map { json ->
+private fun decodeFiles(files: JSONArray): List<CloudFile> = files.objects().map(::decodeCloudFile)
+
+internal fun decodeCloudFile(json: JSONObject): CloudFile =
     CloudFile(
         name = json.getString("name"),
         path = json.getString("path"),
@@ -202,8 +209,9 @@ private fun decodeFiles(files: JSONArray): List<CloudFile> = files.objects().map
         ownerDisplayName = json.nullableString("ownerDisplayName"),
         mountType = json.nullableString("mountType"),
         shareTypes = json.getJSONArray("shareTypes").ints().toSet(),
+        // Listings cached before stars existed have no "favorite" field; the next refresh fills it in.
+        favorite = json.optBoolean("favorite", false),
     )
-}
 
 internal fun Account.cacheIdentity(): String = MessageDigest.getInstance("SHA-256")
     .digest("${NextcloudPath.normalizeServerUrl(serverUrl)}\u0000$username".toByteArray())

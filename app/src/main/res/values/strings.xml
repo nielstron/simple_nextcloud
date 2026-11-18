@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">Simple Nextcloud</string>
     <string name="share_target_label">Upload to Nextcloud</string>
+    <string name="widget_description">A folder, your starred files or recent files</string>
 </resources>
